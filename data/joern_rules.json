@@ -1,0 +1,102 @@
+[
+  {
+    "name": "buffer-overflow",
+    "severity": "high",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\".*cpy|.*cat|.*sprintf|gets\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tbuffer-overflow\")\n}\n"
+  },
+  {
+    "name": "command-injection",
+    "severity": "high",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"system|popen|execl|execve|execvp|execlp|execvpe\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tcommand-injection\")\n}\n"
+  },
+  {
+    "name": "tainted-buffer-access",
+    "severity": "medium",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"gets|scanf|fscanf|vscanf|sscanf\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\ttainted-buffer-access\")\n}\n"
+  },
+  {
+    "name": "format-string-risk",
+    "severity": "medium",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"sprintf|vsprintf|snprintf|vsnprintf\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tformat-string-risk\")\n}\n"
+  },
+  {
+    "name": "memory-leak",
+    "severity": "medium",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"malloc|calloc|realloc|mmap|strdup\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tmemory-leak\")\n}\n"
+  },
+  {
+    "name": "null-pointer-dereference",
+    "severity": "high",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\".*\\..*\").filter { c =>\n  val code = c.code.toLowerCase\n  code.contains(\"->\") && (code.contains(\"null\") || code.contains(\"0\\)\"))\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tnull-pointer-dereference\")\n}\n"
+  },
+  {
+    "name": "integer-overflow",
+    "severity": "high",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\".*\\+.*|.*-.*|.*\\*.*|.*\\/.*\").filter { c =>\n  val code = c.code.toLowerCase\n  (code.contains(\"size\") || code.contains(\"len\") || code.contains(\"count\") || code.contains(\"index\")) &&\n  (code.contains(\"+\") || code.contains(\"-\") || code.contains(\"*\"))\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tinteger-overflow\")\n}\n"
+  },
+  {
+    "name": "buffer-overread",
+    "severity": "medium",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\".*memcpy.*|.*memmove.*|.*strncpy.*|.*strncat.*|.*memcmp.*\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tbuffer-overread\")\n}\n"
+  },
+  {
+    "name": "use-after-free",
+    "severity": "critical",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"free|delete\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tuse-after-free\")\n}\n"
+  },
+  {
+    "name": "double-free",
+    "severity": "critical",
+    "query": "\nimportCpg(\"%s\")\ncpg.local.literal(\"0\").definingCalls.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tdouble-free\")\n}\n"
+  },
+  {
+    "name": "unchecked-return-value",
+    "severity": "medium",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"read|recv|recvfrom|fread|getenv|strlen\").filter { c =>\n  c.inMethod.length > 0 && !c.method.name.headOption.getOrElse(\"\").contains(\"if\")\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tunchecked-return-value\")\n}\n"
+  },
+  {
+    "name": "resource-exhaustion",
+    "severity": "medium",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\".*alloc.*|.*malloc.*|.*calloc.*\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tresource-exhaustion\")\n}\n"
+  },
+  {
+    "name": "race-condition",
+    "severity": "high",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"open|write|read|access|fopen\").filter { c =>\n  val code = c.code.toLowerCase\n  code.contains(\"thread\") || code.contains(\"mutex\") || code.contains(\"lock\") || code.contains(\"atomic\")\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\trace-condition\")\n}\n"
+  },
+  {
+    "name": "integer-underflow",
+    "severity": "high",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.filter { c =>\n  val code = c.code.toLowerCase\n  (code.contains(\"-\") || code.contains(\"-\")) &&\n  (code.contains(\"size\") || code.contains(\"len\") || code.contains(\"offset\") || code.contains(\"count\"))\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tinteger-underflow\")\n}\n"
+  },
+  {
+    "name": "out-of-bounds-read",
+    "severity": "high",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\".*read.*|.*recv.*|.*memcpy.*|.*strcpy.*\").filter { c =>\n  val code = c.code.toLowerCase\n  code.contains(\"+\") && (code.contains(\"len\") || code.contains(\"size\") || code.contains(\"index\"))\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tout-of-bounds-read\")\n}\n"
+  },
+  {
+    "name": "type-confusion",
+    "severity": "medium",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\".*cast.*|.*convert.*\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\ttype-confusion\")\n}\n"
+  },
+  {
+    "name": "path-traversal",
+    "severity": "high",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"open|fopen|access|stat\").filter { c =>\n  val code = c.code.toLowerCase\n  code.contains(\"../\") || code.contains(\"..\\\\\") || code.contains(\"concat\") || code.contains(\"filename\")\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tpath-traversal\")\n}\n"
+  },
+  {
+    "name": "heap-corruption",
+    "severity": "critical",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\"free|delete\").foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\theap-corruption\")\n}\n"
+  },
+  {
+    "name": "stack-buffer-overflow",
+    "severity": "critical",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.name(\".*cpy|.*cat|sprintf\").filter { c =>\n  val code = c.code.toLowerCase\n  code.contains(\"stack\") || code.contains(\"local\")\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tstack-buffer-overflow\")\n}\n"
+  },
+  {
+    "name": "pointer-arithmetic-error",
+    "severity": "medium",
+    "query": "\nimportCpg(\"%s\")\ncpg.method.call.filter { c =>\n  val code = c.code\n  (code.contains(\"+\") || code.contains(\"-\")) && code.contains(\"*\") && (code.contains(\"ptr\") || code.contains(\"pointer\"))\n}.foreach { c =>\n  val code = c.code.replace(\"\\t\", \" \").replace(\"\\n\", \" \")\n  val fileName = c.file.name.headOption.getOrElse(\"unknown\")\n  val lineNum = c.lineNumber.getOrElse(0)\n  println(s\"BNF\\t${fileName}\\t${lineNum}\\t${code}\\tpointer-arithmetic-error\")\n}\n"
+  }
+]

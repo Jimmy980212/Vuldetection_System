@@ -1,0 +1,7 @@
+openai
+distro
+jiter
+tqdm
+sniffio
+requests
+pytest
