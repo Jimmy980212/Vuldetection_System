@@ -1,14 +1,14 @@
 import json
 import os
 import re
+import hashlib
 from typing import Any, Dict, Optional
 
 from core.base import BaseAgent
 from core.models import InferenceResultContract
 from utils.cve_knowledge import CVEKnowledgeBase
-from utils.llm_client import LLMClient
-from utils.llm_gateway import LLMGateway
 from utils.structured_logging import get_logger, log_event
+from utils.llm_manager import get_multi_llm_manager
 
 
 LOGGER = get_logger("vuldetection.inference")
@@ -27,26 +27,19 @@ class InferenceAgent(BaseAgent):
         llm_client_max_retries: int = 1,
         llm_client_retry_backoff_sec: float = 0.2,
         llm_timeout_sec: int = 120,
+        provider_name: Optional[str] = None,
     ):
         super().__init__()
         self.model_name = model_name
         self.base_url = base_url
         self.api_key = api_key
         self.llm_timeout_sec = max(5, int(llm_timeout_sec or 120))
+        self.provider_name = provider_name
 
-        llm_client = LLMClient(
-            model_name=model_name,
-            base_url=base_url,
-            api_key=api_key,
-            max_retries=llm_client_max_retries,
-            retry_backoff_sec=llm_client_retry_backoff_sec,
-        )
-        self.llm_client = LLMGateway(
-            client=llm_client,
-            rpm_limit=llm_rpm_limit,
-            breaker_failure_threshold=llm_breaker_failure_threshold,
-            breaker_reset_sec=llm_breaker_reset_sec,
-        )
+        self.multi_llm = get_multi_llm_manager()
+
+        if provider_name:
+            self.multi_llm.set_active_provider(provider_name)
 
         if cve_db_path is None:
             cve_db_path = os.path.join(
@@ -136,27 +129,30 @@ JSON schema:
                 alert_id=alert_info.get("alert_id", ""),
                 file=alert_info.get("file", ""),
                 line=alert_info.get("line", 0),
-                model=self.model_name,
+                provider=self.multi_llm.active_provider.provider_name if self.multi_llm.active_provider else "unknown",
             )
 
-            result_str = self.llm_client.chat_completion(prompt, system_prompt, timeout_sec=self.llm_timeout_sec)
-            llm_error = self._get_llm_last_error()
+            result_str, error = self.multi_llm.call_with_fallback(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                timeout_sec=self.llm_timeout_sec,
+            )
             if not result_str.strip():
                 log_event(
                     LOGGER,
                     "inference_empty_response",
                     alert_id=alert_info.get("alert_id", ""),
-                    error=llm_error or "Empty model response",
+                    error=error or "Empty model response",
                     status="degraded",
                 )
                 return self._fallback_result(
                     alert_info=alert_info,
                     sliced_code=sliced_code,
-                    error_msg=llm_error or "Empty model response",
+                    error_msg=error or "Empty model response",
                     degraded=True,
                     local_evidence=local_evidence,
                     degraded_reason=self._classify_degraded_reason(
-                        llm_error or "Empty model response"
+                        error or "Empty model response"
                     ),
                 )
 
@@ -232,12 +228,6 @@ JSON schema:
             except json.JSONDecodeError:
                 return None
         return None
-
-    def _get_llm_last_error(self) -> str:
-        getter = getattr(self.llm_client, "get_last_error", None)
-        if callable(getter):
-            return str(getter() or "")
-        return str(getattr(self.llm_client, "last_error", "") or "")
 
     @staticmethod
     def _classify_degraded_reason(error_msg: str, raw_response: str = "") -> str:

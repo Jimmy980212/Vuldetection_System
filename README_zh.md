@@ -15,10 +15,15 @@
   - Cppcheck：快速、基于规则的分析，检测常见漏洞模式
   - Joern：深度代码属性图分析，处理复杂漏洞
 
-- **大语言模型增强分析**：使用 DeepSeek Coder API 实现：
+- **大语言模型增强分析**：支持多种大语言模型：
+  - DeepSeek Coder（默认）
+  - OpenAI GPT-4/4o
+  - Ollama（本地模型，如 CodeLlama、Qwen2.5-Coder）
+  - Azure OpenAI
   - 上下文感知的漏洞分类
   - 减少误报
   - 结合 CWE 的严重程度评估
+  - 主 Provider 失败时自动回退
 
 - **多种输出格式**：支持 JSON、Markdown 和 CSV 格式的报告
 
@@ -72,17 +77,48 @@ pip install -r requirements.txt
 
 5. 配置 API 凭证：
 
-   在项目根目录创建 `config.json` 文件：
+   在项目根目录创建 `config.json` 文件，配置你的大语言模型 Provider：
 ```json
 {
-    "deepseek_api_key": "your-api-key-here"
+    "llm_providers": {
+        "providers": [
+            {
+                "name": "deepseek",
+                "provider_type": "openai_compatible",
+                "model_name": "deepseek-coder",
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "YOUR_API_KEY_HERE",
+                "enabled": true,
+                "is_local": false
+            },
+            {
+                "name": "ollama",
+                "provider_type": "ollama",
+                "model_name": "codellama",
+                "base_url": "http://localhost:11434",
+                "api_key": "",
+                "enabled": false,
+                "is_local": true
+            }
+        ],
+        "default_provider": "deepseek",
+        "fallback_providers": ["ollama"]
+    }
 }
 ```
 
-   或设置环境变量：
-```bash
-export DEEPSEEK_API_KEY="your-api-key-here"
-```
+   **关键配置说明：**
+   - `default_provider`：主用的 LLM Provider
+   - `fallback_providers`：主 Provider 失败时的备用 Provider 列表
+   - `enabled`：设为 `true` 启用该 Provider
+   - `is_local`：本地模型（如 Ollama）设为 `true`，云服务设为 `false`
+
+   **Ollama 本地模型安装：**
+   ```bash
+   # 从 https://ollama.ai 安装 Ollama
+   ollama serve
+   ollama pull codellama  # 或 qwen2.5-coder
+   ```
 
 ## 使用方法
 
@@ -137,9 +173,16 @@ vuldetection/
 │   └── schema.py            # 模式定义
 ├── utils/                   # 工具模块
 │   ├── cve_knowledge.py     # CVE 知识库
-│   ├── llm_client.py        # 大语言模型 API 客户端
-│   ├── llm_gateway.py       # 大语言模型网关
+│   ├── llm_client.py        # LLM API 客户端（旧版）
+│   ├── llm_gateway.py        # LLM 网关（旧版）
+│   ├── llm_provider.py      # LLM Provider 基类
+│   ├── llm_manager.py        # 多LLM管理器
+│   ├── llm_providers/       # LLM Provider 实现
+│   │   ├── openai_provider.py # OpenAI/Azure OpenAI Provider
+│   │   └── ollama_provider.py # Ollama 本地 Provider
 │   └── structured_logging.py # 日志工具
+├── tools/                   # 工具和实用程序
+│   └── llm_provider_manager.py # LLM Provider 管理CLI
 ├── data/                    # 数据文件
 │   ├── CVE_collection.xlsx   # CVE 知识数据库
 │   ├── joern_rules.json      # Joern 分析规则
@@ -192,6 +235,41 @@ vuldetection/
 | `max_alerts` | int | 30 | 最大处理的告警数量 |
 | `analysis_workers` | int | 4 | 并行分析工作线程数 |
 | `wsl_distro` | string | None | WSL 发行版（Windows 上运行 Joern） |
+
+### LLM Provider 管理
+
+使用 CLI 工具管理你的大语言模型 Provider：
+
+```bash
+# 列出所有已配置的 Provider
+python tools/llm_provider_manager.py list
+
+# 检查 Provider 健康状态
+python tools/llm_provider_manager.py status
+
+# 显示当前活动的 Provider
+python tools/llm_provider_manager.py current
+
+# 切换默认 Provider
+python tools/llm_provider_manager.py set-default ollama
+
+# 启用/禁用 Provider
+python tools/llm_provider_manager.py enable ollama
+python tools/llm_provider_manager.py disable ollama
+
+# 添加/移除备用 Provider
+python tools/llm_provider_manager.py add-fallback ollama
+python tools/llm_provider_manager.py remove-fallback ollama
+```
+
+### 支持的 LLM Provider
+
+| Provider | 类型 | 需要API | 说明 |
+|----------|------|---------|------|
+| DeepSeek | 云端 | 是 | 默认，`deepseek-coder` 模型 |
+| OpenAI | 云端 | 是 | GPT-4、GPT-4o |
+| Ollama | 本地 | 否 | 通过 `ollama serve` 本地运行模型 |
+| Azure OpenAI | 云端 | 是 | 企业用户 |
 
 ## CI/CD 集成
 

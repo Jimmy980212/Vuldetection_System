@@ -15,10 +15,15 @@ A multi-agent based automated vulnerability detection system for C/C++ codebases
   - Cppcheck: Fast, rule-based analysis for common vulnerability patterns
   - Joern: Deep code property graph analysis for complex vulnerabilities
 
-- **LLM-Enhanced Analysis**: Uses DeepSeek Coder API for:
+- **LLM-Enhanced Analysis**: Supports multiple LLM providers:
+  - DeepSeek Coder (default)
+  - OpenAI GPT-4/4o
+  - Ollama (local models like CodeLlama, Qwen2.5-Coder)
+  - Azure OpenAI
   - Context-aware vulnerability classification
   - False positive reduction
   - Severity assessment with CWE mapping
+  - Automatic fallback when primary provider fails
 
 - **Multiple Output Formats**: Reports in JSON, Markdown, and CSV formats
 
@@ -72,12 +77,48 @@ pip install -r requirements.txt
 
 5. Configure API credentials:
 
-   Create a `config.json` file in the project root:
+   Create a `config.json` file in the project root with your LLM provider settings:
 ```json
 {
-    "deepseek_api_key": "your-api-key-here"
+    "llm_providers": {
+        "providers": [
+            {
+                "name": "deepseek",
+                "provider_type": "openai_compatible",
+                "model_name": "deepseek-coder",
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "YOUR_API_KEY_HERE",
+                "enabled": true,
+                "is_local": false
+            },
+            {
+                "name": "ollama",
+                "provider_type": "ollama",
+                "model_name": "codellama",
+                "base_url": "http://localhost:11434",
+                "api_key": "",
+                "enabled": false,
+                "is_local": true
+            }
+        ],
+        "default_provider": "deepseek",
+        "fallback_providers": ["ollama"]
+    }
 }
 ```
+
+   **Key Configuration Options:**
+   - `default_provider`: The primary LLM provider to use
+   - `fallback_providers`: List of providers to use if the primary fails
+   - `enabled`: Set to `true` to activate a provider
+   - `is_local`: `true` for Ollama, `false` for cloud services
+
+   **Ollama Setup (Local Models):**
+   ```bash
+   # Install Ollama from https://ollama.ai
+   ollama serve
+   ollama pull codellama  # or qwen2.5-coder
+   ```
 
    Or set environment variable:
 ```bash
@@ -137,9 +178,16 @@ vuldetection/
 │   └── schema.py             # Schema definitions
 ├── utils/                   # Utility modules
 │   ├── cve_knowledge.py      # CVE knowledge base
-│   ├── llm_client.py         # LLM API client
-│   ├── llm_gateway.py        # LLM gateway
+│   ├── llm_client.py         # LLM API client (legacy)
+│   ├── llm_gateway.py         # LLM gateway (legacy)
+│   ├── llm_provider.py       # LLM provider base class
+│   ├── llm_manager.py         # Multi-LLM manager
+│   ├── llm_providers/         # LLM provider implementations
+│   │   ├── openai_provider.py # OpenAI/Azure OpenAI provider
+│   │   └── ollama_provider.py # Ollama local provider
 │   └── structured_logging.py # Logging utilities
+├── tools/                    # Tools and utilities
+│   └── llm_provider_manager.py # LLM provider management CLI
 ├── data/                    # Data files
 │   ├── CVE_collection.xlsx   # CVE knowledge database
 │   ├── joern_rules.json      # Joern analysis rules
@@ -192,6 +240,41 @@ The system generates comprehensive vulnerability reports:
 | `max_alerts` | int | 30 | Maximum alerts to process |
 | `analysis_workers` | int | 4 | Parallel analysis workers |
 | `wsl_distro` | string | None | WSL distribution for Joern (Windows) |
+
+### LLM Provider Management
+
+Manage your LLM providers using the CLI tool:
+
+```bash
+# List all configured providers
+python tools/llm_provider_manager.py list
+
+# Check provider health status
+python tools/llm_provider_manager.py status
+
+# Show current active provider
+python tools/llm_provider_manager.py current
+
+# Switch default provider
+python tools/llm_provider_manager.py set-default ollama
+
+# Enable/disable a provider
+python tools/llm_provider_manager.py enable ollama
+python tools/llm_provider_manager.py disable ollama
+
+# Add/remove fallback providers
+python tools/llm_provider_manager.py add-fallback ollama
+python tools/llm_provider_manager.py remove-fallback ollama
+```
+
+### Supported LLM Providers
+
+| Provider | Type | API Required | Notes |
+|----------|------|--------------|-------|
+| DeepSeek | Cloud | Yes | Default, `deepseek-coder` model |
+| OpenAI | Cloud | Yes | GPT-4, GPT-4o |
+| Ollama | Local | No | Run models locally via `ollama serve` |
+| Azure OpenAI | Cloud | Yes | Enterprise users |
 
 ## CI/CD Integration
 
