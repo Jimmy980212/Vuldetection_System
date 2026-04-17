@@ -1,0 +1,4 @@
+requests
+# Optional for HuggingFace dataset loading only:
+# datasets
+# pandas
