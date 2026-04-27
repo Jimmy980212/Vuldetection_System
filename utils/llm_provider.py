@@ -190,8 +190,8 @@ class MultiLLMManager:
                     {
                         "name": "deepseek",
                         "provider_type": "openai_compatible",
-                        "model_name": "deepseek-coder",
-                        "base_url": "https://api.deepseek.com/v1",
+                        "model_name": "deepseek-v4-pro",
+                        "base_url": "https://api.deepseek.com",
                         "api_key": "",
                         "enabled": True,
                         "is_local": False,

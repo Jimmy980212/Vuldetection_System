@@ -17,8 +17,8 @@ LOGGER = get_logger("vuldetection.inference")
 class InferenceAgent(BaseAgent):
     def __init__(
         self,
-        model_name: str = "deepseek-coder",
-        base_url: Optional[str] = "https://api.deepseek.com/v1",
+        model_name: str = "deepseek-v4-pro",
+        base_url: Optional[str] = "https://api.deepseek.com",
         api_key: Optional[str] = None,
         cve_db_path: Optional[str] = None,
         llm_rpm_limit: int = 60,

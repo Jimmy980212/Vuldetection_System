@@ -18,8 +18,8 @@ class LLMClient:
 
     def __init__(
         self,
-        model_name: str = "deepseek-coder",
-        base_url: str = "https://api.deepseek.com/v1",
+        model_name: str = "deepseek-v4-pro",
+        base_url: str = "https://api.deepseek.com",
         api_key: Optional[str] = None,
         max_retries: int = 2,
         retry_backoff_sec: float = 0.8,

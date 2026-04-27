@@ -66,8 +66,8 @@ def run_vulnerability_detection(
     )
     feature_agent = FeatureAgent(window_size=35)
     inference_agent = InferenceAgent(
-        base_url="https://api.deepseek.com/v1",
-        model_name="deepseek-coder",
+        base_url="https://api.deepseek.com",
+        model_name="deepseek-v4-pro",
         cve_db_path=cve_db_path,
     )
 

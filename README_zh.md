@@ -16,7 +16,7 @@
   - Joern：深度代码属性图分析，处理复杂漏洞
 
 - **大语言模型增强分析**：支持多种大语言模型：
-  - DeepSeek Coder（默认）
+  - DeepSeek v4 Pro（默认）
   - OpenAI GPT-4/4o
   - Ollama（本地模型，如 CodeLlama、Qwen2.5-Coder）
   - Azure OpenAI
@@ -85,8 +85,8 @@ pip install -r requirements.txt
             {
                 "name": "deepseek",
                 "provider_type": "openai_compatible",
-                "model_name": "deepseek-coder",
-                "base_url": "https://api.deepseek.com/v1",
+                "model_name": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
                 "api_key": "YOUR_API_KEY_HERE",
                 "enabled": true,
                 "is_local": false
@@ -266,7 +266,7 @@ python tools/llm_provider_manager.py remove-fallback ollama
 
 | Provider | 类型 | 需要API | 说明 |
 |----------|------|---------|------|
-| DeepSeek | 云端 | 是 | 默认，`deepseek-coder` 模型 |
+| DeepSeek | 云端 | 是 | 默认，`deepseek-v4-pro` 模型 |
 | OpenAI | 云端 | 是 | GPT-4、GPT-4o |
 | Ollama | 本地 | 否 | 通过 `ollama serve` 本地运行模型 |
 | Azure OpenAI | 云端 | 是 | 企业用户 |

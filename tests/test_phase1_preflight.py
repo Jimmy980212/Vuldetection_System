@@ -28,8 +28,8 @@ def test_preflight_reports_missing_api_key_without_network(tmp_path, monkeypatch
             {
                 "name": "deepseek",
                 "provider_type": "openai_compatible",
-                "model_name": "deepseek-coder",
-                "base_url": "https://api.deepseek.com/v1",
+                "model_name": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
                 "api_key": "",
                 "enabled": True,
                 "is_local": False,
@@ -40,6 +40,7 @@ def test_preflight_reports_missing_api_key_without_network(tmp_path, monkeypatch
     manager = MultiLLMManager(config_path=str(config_path))
     result = manager.preflight_health_check()
 
+    assert manager.providers["deepseek"].model_name == "deepseek-v4-pro"
     assert result["ready"] is False
     assert "Missing API key" in result["providers"]["deepseek"]["error"]
 
@@ -53,8 +54,8 @@ def test_provider_api_key_can_come_from_environment(tmp_path, monkeypatch):
             {
                 "name": "deepseek",
                 "provider_type": "openai_compatible",
-                "model_name": "deepseek-coder",
-                "base_url": "https://api.deepseek.com/v1",
+                "model_name": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
                 "api_key": "",
                 "enabled": True,
                 "is_local": False,
@@ -64,6 +65,8 @@ def test_provider_api_key_can_come_from_environment(tmp_path, monkeypatch):
 
     manager = MultiLLMManager(config_path=str(config_path))
 
+    assert manager.providers["deepseek"].model_name == "deepseek-v4-pro"
+    assert manager.providers["deepseek"].config.base_url == "https://api.deepseek.com"
     assert manager.providers["deepseek"].config.api_key == "sk-test"
 
 
@@ -82,8 +85,8 @@ def test_preflight_selects_healthy_fallback(tmp_path, monkeypatch):
             {
                 "name": "deepseek",
                 "provider_type": "openai_compatible",
-                "model_name": "deepseek-coder",
-                "base_url": "https://api.deepseek.com/v1",
+                "model_name": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
                 "api_key": "sk-deepseek",
                 "enabled": True,
                 "is_local": False,

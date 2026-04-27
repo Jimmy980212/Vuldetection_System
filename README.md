@@ -16,7 +16,7 @@ A multi-agent based automated vulnerability detection system for C/C++ codebases
   - Joern: Deep code property graph analysis for complex vulnerabilities
 
 - **LLM-Enhanced Analysis**: Supports multiple LLM providers:
-  - DeepSeek Coder (default)
+  - DeepSeek v4 Pro (default)
   - OpenAI GPT-4/4o
   - Ollama (local models like CodeLlama, Qwen2.5-Coder)
   - Azure OpenAI
@@ -85,8 +85,8 @@ pip install -r requirements.txt
             {
                 "name": "deepseek",
                 "provider_type": "openai_compatible",
-                "model_name": "deepseek-coder",
-                "base_url": "https://api.deepseek.com/v1",
+                "model_name": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
                 "api_key": "YOUR_API_KEY_HERE",
                 "enabled": true,
                 "is_local": false
@@ -271,7 +271,7 @@ python tools/llm_provider_manager.py remove-fallback ollama
 
 | Provider | Type | API Required | Notes |
 |----------|------|--------------|-------|
-| DeepSeek | Cloud | Yes | Default, `deepseek-coder` model |
+| DeepSeek | Cloud | Yes | Default, `deepseek-v4-pro` model |
 | OpenAI | Cloud | Yes | GPT-4, GPT-4o |
 | Ollama | Local | No | Run models locally via `ollama serve` |
 | Azure OpenAI | Cloud | Yes | Enterprise users |
