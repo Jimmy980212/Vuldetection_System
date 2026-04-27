@@ -72,14 +72,13 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
-# Test files
-test_*.py
-test_scripts/
+# Project tests live under tests/ and should be tracked.
 
 # Project specific - outputs and generated data
 outputs/
 data/open_source_projects/
 *.cpg.bin.zip
+tmp/
 
 # Logs
 *.log

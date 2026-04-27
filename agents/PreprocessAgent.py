@@ -113,6 +113,10 @@ class JoernAnalyzer:
         code = int(getattr(result, "returncode", 0) or 0)
         return f"command_failed(returncode={code})"
 
+    @staticmethod
+    def _safe_console_text(value: str) -> str:
+        return str(value or "").encode("ascii", "backslashreplace").decode("ascii")
+
     def _run_wsl_command(self, cmd: List[str], timeout: int = 3600) -> subprocess.CompletedProcess:
         full_cmd = ["wsl"]
         if self.wsl_distro:
@@ -360,7 +364,7 @@ cpg.method.call.name("malloc|calloc|realloc").foreach { c =>
                 print(
                     "[JoernAnalyzer] query failed",
                     f"rule={rule.get('name')}",
-                    f"error={self._extract_command_error(result)[:300]}",
+                    f"error={self._safe_console_text(self._extract_command_error(result)[:300])}",
                 )
                 return []
             severity = self._normalize_joern_severity(rule.get("severity", "medium"))

@@ -1,0 +1,87 @@
+{
+  "name": "phase1_smoke_c_vulnerabilities",
+  "description": "Small labeled smoke benchmark for first-stage regression checks.",
+  "target": "data/test_codes/test_10_vulnerabilities.c",
+  "labels": [
+    {
+      "id": "PH1-BOF-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 9,
+      "cwe_id": "CWE-120",
+      "vulnerability_type": "buffer_overflow",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-UNINIT-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 14,
+      "cwe_id": "CWE-457",
+      "vulnerability_type": "uninitialized_variable",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-NPD-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 20,
+      "cwe_id": "CWE-476",
+      "vulnerability_type": "null_pointer_dereference",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-LEAK-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 24,
+      "cwe_id": "CWE-401",
+      "vulnerability_type": "memory_leak",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-INTOVF-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 31,
+      "cwe_id": "CWE-190",
+      "vulnerability_type": "integer_overflow",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-FMT-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 35,
+      "cwe_id": "CWE-134",
+      "vulnerability_type": "format_string",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-RECUR-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 42,
+      "cwe_id": "CWE-674",
+      "vulnerability_type": "uncontrolled_recursion",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-RACE-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 49,
+      "cwe_id": "CWE-362",
+      "vulnerability_type": "race_condition",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-ALLOC-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 57,
+      "cwe_id": "CWE-789",
+      "vulnerability_type": "uncontrolled_memory_allocation",
+      "is_vulnerable": true
+    },
+    {
+      "id": "PH1-CMD-001",
+      "file": "data/test_codes/test_10_vulnerabilities.c",
+      "line": 64,
+      "cwe_id": "CWE-78",
+      "vulnerability_type": "command_injection",
+      "is_vulnerable": true
+    }
+  ]
+}

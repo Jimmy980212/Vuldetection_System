@@ -1,5 +1,5 @@
-import os
 import json
+import os
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
@@ -24,6 +24,10 @@ class LLMProviderConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LLMProviderConfig":
+        extra_config = data.get("extra_config", {}) or {}
+        if not isinstance(extra_config, dict):
+            extra_config = {}
+
         return cls(
             name=str(data.get("name", "")),
             provider_type=str(data.get("provider_type", "openai_compatible")),
@@ -38,7 +42,7 @@ class LLMProviderConfig:
             max_tokens=int(data.get("max_tokens", 2000)),
             enabled=bool(data.get("enabled", True)),
             is_local=bool(data.get("is_local", False)),
-            extra_config=data.get("extra_config", {}),
+            extra_config=extra_config,
         )
 
 
@@ -93,17 +97,19 @@ class LLMProviderFactory:
 
 
 class MultiLLMManager:
-    def __init__(self):
+    PLACEHOLDER_KEYS = {"", "YOUR_API_KEY_HERE", "your_api_key_here", "your-api-key-here"}
+
+    def __init__(self, config_path: Optional[str] = None):
         self.providers: Dict[str, LLMProvider] = {}
         self.active_provider: Optional[LLMProvider] = None
         self.fallback_providers: List[LLMProvider] = []
+        self.config_path = config_path or os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
         self._load_config()
 
     def _load_config(self) -> None:
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+        config_path = self.config_path
         if not os.path.exists(config_path):
             self._create_default_config(config_path)
-            return
 
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
@@ -116,6 +122,7 @@ class MultiLLMManager:
             provider_cfg = LLMProviderConfig.from_dict(provider_data)
             if not provider_cfg.enabled:
                 continue
+            provider_cfg.api_key = self._resolve_api_key(provider_cfg, config_data)
             try:
                 provider = LLMProviderFactory.create(provider_cfg)
                 self.providers[provider_cfg.name] = provider
@@ -133,7 +140,49 @@ class MultiLLMManager:
             if name in self.providers and self.providers[name] != self.active_provider:
                 self.fallback_providers.append(self.providers[name])
 
+    @classmethod
+    def _is_placeholder_key(cls, value: str) -> bool:
+        return str(value or "").strip() in cls.PLACEHOLDER_KEYS
+
+    def _resolve_api_key(self, provider_cfg: LLMProviderConfig, config_data: Dict[str, Any]) -> str:
+        configured = str(provider_cfg.api_key or "").strip()
+        if configured.lower().startswith("env:"):
+            return os.getenv(configured.split(":", 1)[1].strip(), "")
+        if configured and not self._is_placeholder_key(configured):
+            return configured
+
+        env_candidates = []
+        explicit_env = provider_cfg.extra_config.get("api_key_env")
+        if explicit_env:
+            env_candidates.append(str(explicit_env))
+
+        provider_token = provider_cfg.name.upper().replace("-", "_")
+        env_candidates.extend(
+            [
+                f"VULDET_{provider_token}_API_KEY",
+                f"{provider_token}_API_KEY",
+            ]
+        )
+
+        provider_type = provider_cfg.provider_type.lower()
+        if provider_type in {"openai_compatible", "openai"} and provider_cfg.name.lower() == "openai":
+            env_candidates.append("OPENAI_API_KEY")
+        if provider_cfg.name.lower() == "deepseek":
+            env_candidates.insert(0, "DEEPSEEK_API_KEY")
+            root_key = str(config_data.get("deepseek_api_key", "") or "").strip()
+            if root_key and not self._is_placeholder_key(root_key):
+                return root_key
+        if provider_type == "azure_openai":
+            env_candidates.append("AZURE_OPENAI_API_KEY")
+
+        for env_name in env_candidates:
+            value = os.getenv(env_name, "").strip()
+            if value and not self._is_placeholder_key(value):
+                return value
+        return ""
+
     def _create_default_config(self, config_path: str) -> None:
+        os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
         default_config = {
             "deepseek_api_key": "",
             "llm_providers": {
@@ -218,14 +267,51 @@ class MultiLLMManager:
             except Exception as exc:
                 is_healthy = False
                 error_msg = str(exc)
+            if not is_healthy and not error_msg:
+                error_msg = provider.get_last_error()
             results[name] = {
                 "healthy": is_healthy,
-                "error": error_msg,
+                "error": error_msg or "",
                 "model": provider.model_name,
                 "is_local": provider.config.is_local,
                 "provider_type": provider.config.provider_type,
+                "is_active": provider == self.active_provider,
+                "is_fallback": provider in self.fallback_providers,
             }
         return results
+
+    def preflight_health_check(self) -> Dict[str, Any]:
+        results = self.health_check_all()
+        healthy = [name for name, info in results.items() if info.get("healthy")]
+
+        selected_name = ""
+        if self.active_provider and self.active_provider.provider_name in healthy:
+            selected_name = self.active_provider.provider_name
+        else:
+            for provider in self.fallback_providers:
+                if provider.provider_name in healthy:
+                    selected_name = provider.provider_name
+                    break
+            if not selected_name and healthy:
+                selected_name = healthy[0]
+
+        if selected_name:
+            self.set_active_provider(selected_name)
+
+        errors = []
+        for name, info in results.items():
+            if not info.get("healthy"):
+                error = info.get("error") or "health check failed"
+                errors.append(f"{name}: {error}")
+
+        return {
+            "ready": bool(selected_name),
+            "selected_provider": selected_name,
+            "active_provider": self.active_provider.provider_name if self.active_provider else "",
+            "healthy_providers": healthy,
+            "providers": results,
+            "errors": errors,
+        }
 
     def get_available_providers(self) -> List[Dict[str, Any]]:
         return [
@@ -240,5 +326,5 @@ class MultiLLMManager:
         ]
 
 
-def get_multi_llm_manager() -> MultiLLMManager:
-    return MultiLLMManager()
+def get_multi_llm_manager(config_path: Optional[str] = None) -> MultiLLMManager:
+    return MultiLLMManager(config_path=config_path)

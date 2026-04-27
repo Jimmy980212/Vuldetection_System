@@ -48,6 +48,9 @@ class InferenceAgent(BaseAgent):
         self.cve_knowledge = CVEKnowledgeBase(cve_db_path)
         self.prompt_template = self._get_prompt_template()
 
+    def preflight_health_check(self) -> Dict[str, Any]:
+        return self.multi_llm.preflight_health_check()
+
     @staticmethod
     def _get_prompt_template() -> str:
         return """
@@ -385,6 +388,9 @@ JSON schema:
                 r"\bgets\s*\(",
             ],
             "use_after_free": [r"\bfree\s*\(", r"\bdelete\s+"],
+            "double_free": [r"\bfree\s*\([^)]+\)[\s\S]{0,240}\bfree\s*\(", r"\bdelete\s+"],
+            "out_of_bounds": [r"\[[^\]]+\]", r"\bmemcpy\s*\(", r"\bmemmove\s*\(", r"\bmemcmp\s*\("],
+            "null_pointer": [r"\bNULL\b", r"\bnullptr\b", r"->", r"\*\s*\w+"],
             "format_string": [r"\bprintf\s*\([^,\)]*\)", r"\bfprintf\s*\([^,]+,[^,\)]*\)"],
             "command_injection": [r"\bsystem\s*\(", r"\bexec\w*\s*\("],
             "integer_overflow": [r"\+\s*\w+", r"-\s*\w+", r"\bINT_MAX\b", r"overflow"],

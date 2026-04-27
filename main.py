@@ -17,6 +17,13 @@ from utils.structured_logging import get_logger, log_event
 LOGGER = get_logger("vuldetection.main")
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def run_vulnerability_detection(
     target_path: str,
     cppcheck_path: str = None,
@@ -25,6 +32,8 @@ def run_vulnerability_detection(
     wsl_distro: str = None,
     enable_joern: bool = True,
     save_cpg: bool = True,
+    require_llm_health: bool = True,
+    llm_health_check: bool = True,
 ) -> Dict[str, object]:
     scan_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     started_at = datetime.now().isoformat(timespec="seconds")
@@ -40,6 +49,7 @@ def run_vulnerability_detection(
         enable_joern=enable_joern,
         max_alerts=max_alerts,
         analysis_workers=analysis_workers,
+        require_llm_health=require_llm_health,
     )
 
     coordinator = AgentCoordinator()
@@ -60,6 +70,47 @@ def run_vulnerability_detection(
         model_name="deepseek-coder",
         cve_db_path=cve_db_path,
     )
+
+    llm_preflight = {"skipped": True}
+    if llm_health_check:
+        print("\n=== LLM Provider Preflight ===")
+        llm_preflight = inference_agent.preflight_health_check()
+        if llm_preflight.get("ready"):
+            print(
+                "LLM ready: "
+                f"{llm_preflight.get('selected_provider')} "
+                f"(healthy={', '.join(llm_preflight.get('healthy_providers', []))})"
+            )
+        else:
+            print("No healthy LLM provider found.")
+            for error in llm_preflight.get("errors", [])[:8]:
+                print(f"  - {error}")
+
+        allow_degraded = _env_flag("VULDET_ALLOW_DEGRADED_LLM", False)
+        if require_llm_health and not allow_degraded and not llm_preflight.get("ready"):
+            finished_at = datetime.now().isoformat(timespec="seconds")
+            metadata = {
+                "scan_id": scan_id,
+                "target_path": os.path.abspath(target_path),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "llm_preflight": llm_preflight,
+                "pipeline_stages": ["llm_preflight"],
+            }
+            log_event(
+                LOGGER,
+                "scan_aborted_llm_unhealthy",
+                scan_id=scan_id,
+                status="error",
+                errors=llm_preflight.get("errors", []),
+            )
+            return {
+                "scan_id": scan_id,
+                "error": "No healthy LLM provider. Set an API key, enable a local provider, or set VULDET_ALLOW_DEGRADED_LLM=1.",
+                "reports": [],
+                "metadata": metadata,
+            }
+
     validation_agent = ValidationAgent(cve_db_path=cve_db_path)
     report_agent = ReportAgent()
 
@@ -149,6 +200,7 @@ def run_vulnerability_detection(
         "degraded_alerts": deep_result.degraded_alerts,
         "schema_warning_count": len(deep_result.schema_warnings),
         "cpg_path": project_info.get("cpg_path"),
+        "llm_preflight": llm_preflight,
         "pipeline_stages": ["candidate_engine", "deep_analyzer"],
         "stage_metrics": {
             "candidate_engine": candidate_result.metrics,

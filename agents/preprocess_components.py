@@ -135,9 +135,11 @@ class AlertDeduplicator:
             "buffer_overflow": ["overflow", "strcpy", "strcat", "sprintf", "gets", "memcpy"],
             "command_injection": ["command-injection", "command injection", "system(", "exec", "popen"],
             "tainted_input": ["tainted", "scanf", "recv", "gets", "fgets"],
-            "uaf": ["use-after-free", "use after free", "double free", "dangling"],
+            "use_after_free": ["use-after-free", "use after free", "uaf", "dangling"],
+            "double_free": ["double-free", "double free"],
+            "out_of_bounds": ["out-of-bounds", "out of bounds", "oob", "overread", "overwrite", "bounds guard"],
             "format_string": ["format-string", "format string", "printf("],
-            "null_pointer": ["null pointer", "nullptr", "dereference"],
+            "null_pointer": ["null pointer", "null-pointer", "nullptr", "null dereference", "null-deref"],
             "memory_leak": ["memory leak", "leak"],
         }
         for family, keywords in families.items():

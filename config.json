@@ -1,13 +1,13 @@
 {
-    "deepseek_api_key": "YOUR_API_KEY_HERE",
+    "deepseek_api_key": "sk-c2158243d09e4b719de08265691d8713",
     "llm_providers": {
         "providers": [
             {
                 "name": "deepseek",
                 "provider_type": "openai_compatible",
-                "model_name": "deepseek-coder",
-                "base_url": "https://api.deepseek.com/v1",
-                "api_key": "",
+                "model_name": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "sk-c2158243d09e4b719de08265691d8713",
                 "enabled": true,
                 "is_local": false,
                 "max_retries": 2,

@@ -48,6 +48,9 @@ class OpenAICompatibleProvider(LLMProvider):
         if not base_url:
             self.set_last_error("Empty base_url.")
             return ""
+        if not self.config.is_local and not self.config.api_key:
+            self.set_last_error(f"Missing API key for provider '{self.config.name}'.")
+            return ""
 
         url = f"{base_url}/chat/completions"
         headers = {
@@ -127,8 +130,13 @@ class OpenAICompatibleProvider(LLMProvider):
         return ""
 
     def health_check(self) -> bool:
+        self.set_last_error("")
         base_url = self.config.base_url.rstrip("/")
         if not base_url:
+            self.set_last_error("Empty base_url.")
+            return False
+        if not self.config.is_local and not self.config.api_key:
+            self.set_last_error(f"Missing API key for provider '{self.config.name}'.")
             return False
 
         try:
@@ -138,8 +146,13 @@ class OpenAICompatibleProvider(LLMProvider):
                 headers["Authorization"] = f"Bearer {self.config.api_key}"
 
             response = requests.get(url, headers=headers, timeout=10)
-            return response.status_code == 200
-        except Exception:
+            if response.status_code == 200:
+                self.set_last_error("")
+                return True
+            self.set_last_error(f"HTTP {response.status_code} from model list endpoint.")
+            return False
+        except Exception as exc:
+            self.set_last_error(f"health_check_error: {exc}")
             return False
 
 
@@ -155,6 +168,9 @@ class AzureOpenAIProvider(OpenAICompatibleProvider):
         base_url = self.config.base_url.rstrip("/")
         if not base_url:
             self.set_last_error("Empty base_url.")
+            return ""
+        if not self.config.api_key:
+            self.set_last_error(f"Missing API key for provider '{self.config.name}'.")
             return ""
 
         url = f"{base_url}/chat/completions?api-version={self.api_version}"
@@ -207,6 +223,28 @@ class AzureOpenAIProvider(OpenAICompatibleProvider):
                 return ""
 
         return ""
+
+    def health_check(self) -> bool:
+        self.set_last_error("")
+        base_url = self.config.base_url.rstrip("/")
+        if not base_url:
+            self.set_last_error("Empty base_url.")
+            return False
+        if not self.config.api_key:
+            self.set_last_error(f"Missing API key for provider '{self.config.name}'.")
+            return False
+
+        url = f"{base_url}/openai/deployments?api-version={self.api_version}"
+        try:
+            response = requests.get(url, headers={"api-key": self.config.api_key}, timeout=10)
+            if response.status_code == 200:
+                self.set_last_error("")
+                return True
+            self.set_last_error(f"HTTP {response.status_code} from Azure deployment endpoint.")
+            return False
+        except Exception as exc:
+            self.set_last_error(f"azure_health_check_error: {exc}")
+            return False
 
 
 LLMProviderFactory.register("openai_compatible", OpenAICompatibleProvider)

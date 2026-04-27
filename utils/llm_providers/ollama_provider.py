@@ -131,8 +131,10 @@ class OllamaProvider(LLMProvider):
             return ""
 
     def health_check(self) -> bool:
+        self.set_last_error("")
         base_url = self.config.base_url.rstrip("/")
         if not base_url:
+            self.set_last_error("Empty base_url.")
             return False
 
         try:
@@ -148,8 +150,10 @@ class OllamaProvider(LLMProvider):
                     available_models=available,
                 )
                 return True
+            self.set_last_error(f"HTTP {response.status_code} from Ollama tags endpoint.")
             return False
         except Exception as exc:
+            self.set_last_error(f"ollama_health_check_error: {exc}")
             log_event(LOGGER, "ollama_health_check", status="error", error=str(exc))
             return False
 
