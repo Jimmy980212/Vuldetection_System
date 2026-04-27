@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from agents.PreprocessAgent import JoernAnalyzer
+from agents.PreprocessAgent import JoernAnalyzer, RawAlert
+from agents.preprocess_components import AlertDeduplicator
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +46,7 @@ def test_joern_rules_are_valid_for_loader_contract():
         assert "importCpg(\"%s\")" in rule["query"]
         assert "println(s\"BNF\\t" in rule["query"]
         assert rule["severity"] in {"critical", "high"}
+        assert ".code.headOption" not in rule["query"]
 
 
 def test_joern_bnf_parser_accepts_function_and_evidence_fields():
@@ -60,3 +62,33 @@ def test_joern_bnf_parser_accepts_function_and_evidence_fields():
     assert alerts[0].msg == "use-after-free: ptr freed at line 10 and used at line 42: ptr->x"
     assert alerts[0].severity == "error"
     assert alerts[0].tool == "joern"
+
+
+def test_deduplicator_merges_cppcheck_and_joern_high_risk_wording():
+    deduplicator = AlertDeduplicator()
+    alerts = [
+        RawAlert(
+            alert_id="cppcheck-uaf",
+            file="demo.c",
+            line=17,
+            func="unknown",
+            msg="Dereferencing 'buf' after it is deallocated / released",
+            severity="error",
+            tool="cppcheck",
+        ),
+        RawAlert(
+            alert_id="joern-uaf",
+            file="demo.c",
+            line=17,
+            func="buf",
+            msg="use-after-free: buf freed at line 16 and used at line 17",
+            severity="error",
+            tool="joern",
+        ),
+    ]
+
+    merged = deduplicator.deduplicate(alerts)
+
+    assert len(merged) == 1
+    assert merged[0].tool == "cppcheck+joern"
+    assert "use-after-free" in merged[0].msg

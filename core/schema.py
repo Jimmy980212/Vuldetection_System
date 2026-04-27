@@ -65,6 +65,9 @@ class ProgramSliceSchema:
             "slice_lines": list,
             "control_flow": dict,
             "slice_quality": str,
+            "evidence_package": dict,
+            "prompt_context": str,
+            "token_budget": dict,
         }
         self.required = ("sliced_code", "source_lines", "sink_lines", "slice_lines", "control_flow")
 

@@ -40,6 +40,9 @@ class ProgramSliceContract:
     sliced_code: str = ""
     control_flow: Dict[str, List[int]] = field(default_factory=dict)
     slice_quality: str = "low"
+    evidence_package: Dict[str, Any] = field(default_factory=dict)
+    prompt_context: str = ""
+    token_budget: Dict[str, Any] = field(default_factory=dict)
 
     required_fields = ("sliced_code", "source_lines", "sink_lines", "slice_lines", "control_flow")
 
@@ -60,6 +63,9 @@ class ProgramSliceContract:
             sliced_code=str(payload.get("sliced_code", "") or ""),
             control_flow=control_flow,
             slice_quality=str(payload.get("slice_quality", "low") or "low"),
+            evidence_package=payload.get("evidence_package", {}) if isinstance(payload.get("evidence_package", {}), dict) else {},
+            prompt_context=str(payload.get("prompt_context", "") or ""),
+            token_budget=payload.get("token_budget", {}) if isinstance(payload.get("token_budget", {}), dict) else {},
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -70,6 +76,9 @@ class ProgramSliceContract:
             "sliced_code": str(self.sliced_code),
             "control_flow": dict(self.control_flow),
             "slice_quality": str(self.slice_quality),
+            "evidence_package": dict(self.evidence_package),
+            "prompt_context": str(self.prompt_context),
+            "token_budget": dict(self.token_budget),
         }
 
 

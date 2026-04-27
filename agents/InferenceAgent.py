@@ -55,7 +55,8 @@ class InferenceAgent(BaseAgent):
     def _get_prompt_template() -> str:
         return """
 You are a senior C/C++ security reviewer.
-Analyze the following alert and code slice, then output strict JSON only.
+Analyze the following alert and source-sink evidence package, then output strict JSON only.
+Prefer concrete evidence over dangerous API names. Treat missing guards as a hypothesis to verify.
 
 file: {file}
 line: {line}
@@ -64,6 +65,12 @@ alert: {sink}
 source_lines: {source_lines}
 sink_lines: {sink_lines}
 slice_lines: {slice_lines}
+prompt_token_budget: {prompt_token_budget}
+
+source_sink_evidence:
+```json
+{evidence_context}
+```
 
 code:
 ```c
@@ -110,18 +117,47 @@ JSON schema:
 
         alert_msg = alert_info.get("msg", "")
         cve_intel = self.cve_knowledge.build_prompt_context(alert_msg=alert_msg, cwe_hint=alert_msg)
-
-        prompt = self.prompt_template.format(
-            file=alert_info.get("file", "unknown"),
-            line=alert_info.get("line", 0),
-            func=alert_info.get("func", "unknown"),
-            sink=alert_msg,
+        prompt_inputs = self._build_budgeted_prompt_inputs(
+            program_slice=program_slice,
             sliced_code=sliced_code,
-            source_lines=source_lines,
-            sink_lines=sink_lines,
-            slice_lines=slice_lines,
             cve_intel=cve_intel,
         )
+
+        def render_prompt() -> str:
+            return self.prompt_template.format(
+                file=alert_info.get("file", "unknown"),
+                line=alert_info.get("line", 0),
+                func=alert_info.get("func", "unknown"),
+                sink=alert_msg,
+                sliced_code=prompt_inputs["sliced_code"],
+                source_lines=source_lines,
+                sink_lines=sink_lines,
+                slice_lines=slice_lines,
+                evidence_context=prompt_inputs["evidence_context"],
+                cve_intel=prompt_inputs["cve_intel"],
+                prompt_token_budget=prompt_inputs["max_prompt_tokens"],
+            )
+
+        prompt = render_prompt()
+        for _ in range(3):
+            estimated = self._estimate_tokens(prompt)
+            if estimated <= prompt_inputs["max_prompt_tokens"]:
+                break
+            overflow = estimated - prompt_inputs["max_prompt_tokens"]
+            code_tokens = self._estimate_tokens(prompt_inputs["sliced_code"])
+            if code_tokens > 220:
+                prompt_inputs["sliced_code"] = self._trim_text_to_tokens(
+                    prompt_inputs["sliced_code"],
+                    max(220, code_tokens - overflow - 100),
+                )
+            else:
+                evidence_tokens = self._estimate_tokens(prompt_inputs["evidence_context"])
+                prompt_inputs["evidence_context"] = self._trim_text_to_tokens(
+                    prompt_inputs["evidence_context"],
+                    max(260, evidence_tokens - overflow - 60),
+                )
+            prompt = render_prompt()
+        estimated_prompt_tokens = self._estimate_tokens(prompt)
 
         local_evidence = self._collect_local_evidence(alert_msg=alert_msg, sliced_code=sliced_code)
         try:
@@ -133,6 +169,8 @@ JSON schema:
                 file=alert_info.get("file", ""),
                 line=alert_info.get("line", 0),
                 provider=self.multi_llm.active_provider.provider_name if self.multi_llm.active_provider else "unknown",
+                estimated_prompt_tokens=estimated_prompt_tokens,
+                prompt_token_budget=prompt_inputs["max_prompt_tokens"],
             )
 
             result_str, error = self.multi_llm.call_with_fallback(
@@ -250,6 +288,83 @@ JSON schema:
         if "json" in text and "no json found" in text:
             return "response_parse_error"
         return "unknown_degraded"
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, (len(str(text or "")) + 3) // 4)
+
+    @staticmethod
+    def _trim_text_to_tokens(text: str, max_tokens: int) -> str:
+        value = str(text or "")
+        if InferenceAgent._estimate_tokens(value) <= max_tokens:
+            return value
+        max_chars = max(80, int(max_tokens) * 4)
+        return value[:max_chars].rstrip() + "\n... [truncated to fit prompt token budget]"
+
+    @staticmethod
+    def _resolve_prompt_token_budget(program_slice: Dict[str, Any]) -> int:
+        token_budget = program_slice.get("token_budget", {}) if isinstance(program_slice, dict) else {}
+        raw = token_budget.get("max_prompt_tokens", os.getenv("VULDET_MAX_PROMPT_TOKENS", 3600))
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 3600
+        return max(2000, min(4000, value))
+
+    def _compact_evidence_context(self, program_slice: Dict[str, Any], max_tokens: int) -> str:
+        prompt_context = str(program_slice.get("prompt_context", "") or "")
+        if prompt_context:
+            try:
+                parsed = json.loads(prompt_context)
+                parsed.pop("code_excerpt", None)
+                prompt_context = json.dumps(parsed, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            if self._estimate_tokens(prompt_context) <= max_tokens:
+                return prompt_context
+
+        evidence = program_slice.get("evidence_package", {}) or {}
+        if not isinstance(evidence, dict):
+            evidence = {}
+        compact = {
+            "source_sink_evidence": {
+                "version": evidence.get("version", "source_sink_evidence.v1"),
+                "function": evidence.get("function", {}),
+                "alert_line": evidence.get("alert_line", 0),
+                "key_variables": (evidence.get("key_variables", []) or [])[:8],
+                "source_sink_paths": (evidence.get("source_sink_paths", []) or [])[:3],
+                "control_conditions": (evidence.get("control_conditions", []) or [])[:6],
+                "sanitizers": (evidence.get("sanitizers", []) or [])[:6],
+                "memory_events": (evidence.get("memory_events", []) or [])[:6],
+                "dangerous_calls": (evidence.get("dangerous_calls", []) or [])[:8],
+                "notes": (evidence.get("notes", []) or [])[:2],
+            }
+        }
+        text = json.dumps(compact, ensure_ascii=False, indent=2)
+        return self._trim_text_to_tokens(text, max_tokens)
+
+    def _build_budgeted_prompt_inputs(
+        self,
+        program_slice: Dict[str, Any],
+        sliced_code: str,
+        cve_intel: str,
+    ) -> Dict[str, Any]:
+        max_prompt_tokens = self._resolve_prompt_token_budget(program_slice)
+        evidence_budget = min(760, max(420, max_prompt_tokens // 4))
+        cve_budget = min(320, max(180, max_prompt_tokens // 10))
+        template_overhead = 760
+        code_budget = max(260, max_prompt_tokens - evidence_budget - cve_budget - template_overhead)
+
+        evidence_context = self._compact_evidence_context(program_slice, evidence_budget)
+        budgeted_code = self._trim_text_to_tokens(sliced_code, code_budget)
+        budgeted_cve = self._trim_text_to_tokens(cve_intel, cve_budget)
+
+        return {
+            "max_prompt_tokens": max_prompt_tokens,
+            "evidence_context": evidence_context,
+            "sliced_code": budgeted_code,
+            "cve_intel": budgeted_cve,
+        }
 
     def _normalize_result(
         self,
