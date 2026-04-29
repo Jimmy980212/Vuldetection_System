@@ -7,6 +7,7 @@ import os
 import re
 import json
 import threading
+import time
 from typing import Any, Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -262,6 +263,115 @@ class EnhancedMetaAgent:
             enriched_reports.append(report)
         
         return enriched_reports
+
+    def _build_schema_summary(self, warnings: List[str], stage_validity: Dict[str, bool]) -> Dict[str, Any]:
+        return {
+            "ok": not warnings,
+            "warning_count": len(warnings),
+            "warnings": warnings,
+            "stage_validity": stage_validity,
+        }
+
+    def _validate_stage_static(self, payload: Any, warnings: List[str]) -> bool:
+        if not isinstance(payload, dict):
+            warnings.append("stage static: must be object")
+            return False
+        return True
+
+    def _validate_stage_slice(self, payload: Any, warnings: List[str]) -> bool:
+        if not isinstance(payload, dict):
+            warnings.append("stage slice: must be object")
+            return False
+        if "suspicious_count" not in payload:
+            warnings.append("stage slice: missing suspicious_count")
+        return True
+
+    def _validate_stage_llm(self, payload: Any, warnings: List[str]) -> bool:
+        if not isinstance(payload, list):
+            warnings.append("stage llm: must be list")
+            return False
+        return True
+
+    def _validate_stage_validation(self, payload: Any, warnings: List[str]) -> bool:
+        if not isinstance(payload, list):
+            warnings.append("stage validation: must be list")
+            return False
+        return True
+
+    def _validate_stage_report(self, payload: Any, warnings: List[str]) -> bool:
+        if not isinstance(payload, dict):
+            warnings.append("stage report: must be object")
+            return False
+        required = ("total_vulnerabilities", "vulnerabilities", "severity_summary")
+        for key in required:
+            if key not in payload:
+                warnings.append(f"stage report: missing {key}")
+        return True
+
+    def _validate_stage_enhanced_analysis(self, payload: Any, warnings: List[str]) -> bool:
+        if not isinstance(payload, dict):
+            warnings.append("stage enhanced_analysis: must be object")
+            return False
+        required = ("hypotheses_extracted", "trigger_paths_generated", "two_phase_validation_passed")
+        for key in required:
+            if key not in payload:
+                warnings.append(f"stage enhanced_analysis: missing {key}")
+        return True
+
+    def _finalize_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        warnings: List[str] = []
+        stage_validity = {
+            "static": self._validate_stage_static(result.get("static"), warnings),
+            "slice": self._validate_stage_slice(result.get("slice"), warnings),
+            "llm": self._validate_stage_llm(result.get("llm"), warnings),
+            "validation": self._validate_stage_validation(result.get("validation"), warnings),
+            "report": self._validate_stage_report(result.get("report"), warnings),
+            "enhanced_analysis": self._validate_stage_enhanced_analysis(result.get("enhanced_analysis"), warnings),
+        }
+        validator_warnings = getattr(self.validator_agent, "schema_warnings", []) or []
+        if validator_warnings:
+            warnings.extend([f"validator: {x}" for x in validator_warnings])
+        report_schema_warnings = []
+        if isinstance(result.get("report"), dict):
+            report_schema_warnings = result["report"].get("schema_warnings", []) or []
+        if report_schema_warnings:
+            warnings.extend([f"report: {x}" for x in report_schema_warnings])
+        result["schema_validation"] = self._build_schema_summary(warnings, stage_validity)
+        return result
+
+    def _new_observability(self) -> Dict[str, Any]:
+        return {
+            "cached": False,
+            "stage_metrics": {
+                "static_analysis_ms": 0.0,
+                "slice_construction_ms": 0.0,
+                "hypothesis_extraction_ms": 0.0,
+                "trigger_path_ms": 0.0,
+                "evidence_scoring_ms": 0.0,
+                "llm_inference_ms": 0.0,
+                "validation_ms": 0.0,
+                "report_generation_ms": 0.0,
+                "total_analysis_ms": 0.0,
+            },
+            "counts": {
+                "candidate_cwes": 0,
+                "llm_input_slices": 0,
+                "llm_results_before_filter": 0,
+                "llm_results_after_filter": 0,
+                "validated_results": 0,
+                "report_vulnerability_count": 0,
+                "llm_error_count": 0,
+                "schema_warning_count": 0,
+            },
+        }
+
+    def _attach_observability(self, result: Dict[str, Any], observability: Dict[str, Any]) -> Dict[str, Any]:
+        schema_warning_count = int(
+            ((result.get("schema_validation") or {}).get("warning_count", 0) or 0)
+        )
+        observability["counts"]["schema_warning_count"] = schema_warning_count
+        result["observability"] = observability
+        return result
     
     def analyze(
         self,
@@ -277,6 +387,9 @@ class EnhancedMetaAgent:
         static_result_override: 若提供则跳过 StaticAnalyzer（用于 Java 工作区共享 CPG）。
         context_char_limit: 传入 LLM 的代码前缀长度；None 时 C 默认 500，Java 子类可通过 _java_mode 使用 2000。
         """
+
+        analyze_start = time.perf_counter()
+        observability = self._new_observability()
 
         # 重置增强分析信息
         self.enhanced_analysis_info = {
@@ -298,7 +411,14 @@ class EnhancedMetaAgent:
             with self._analysis_cache_lock:
                 if cache_key in self.analysis_cache:
                     print(f"\nUsing cached result: {file_info.get('file_name')}")
-                    return self.analysis_cache[cache_key]
+                    cached_result = self.analysis_cache[cache_key]
+                    if isinstance(cached_result, dict):
+                        cached_obs = dict(cached_result.get("observability", {}) or {})
+                        cached_obs.setdefault("stage_metrics", {})
+                        cached_obs.setdefault("counts", {})
+                        cached_obs["cached"] = True
+                        cached_result["observability"] = cached_obs
+                    return cached_result
         
         def _progress(step_idx: int, stage_name: str) -> None:
             try:
@@ -415,20 +535,25 @@ class EnhancedMetaAgent:
         
         # 1. Static analysis
         _progress(1, "静态分析")
+        t0 = time.perf_counter()
         if static_result_override is not None:
             print("  [StaticAnalyzer] 使用预计算静态结果（工作区共享 CPG）")
             static_result = static_result_override
         else:
             static_result = self.static_agent.process(code_file)
+        observability["stage_metrics"]["static_analysis_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         
         # 2. Enhanced slice construction
         _progress(2, "切片构造")
+        t0 = time.perf_counter()
         slice_result = self.enhanced_slice_agent.process(code_content, static_result)
+        observability["stage_metrics"]["slice_construction_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         
         # ========== 新增：假设提取阶段 ==========
         hypotheses = []
         if self.enable_hypothesis_extraction and hasattr(self, 'hypothesis_extractor'):
             print(f"  [EnhancedMetaAgent] 执行假设提取...")
+            t0 = time.perf_counter()
             try:
                 hypotheses = self.hypothesis_extractor.extract_hypotheses(code_content, static_result)
                 stats = getattr(self.hypothesis_extractor, "last_stats", {}) or {}
@@ -442,11 +567,15 @@ class EnhancedMetaAgent:
                     print(f"  [EnhancedMetaAgent] 提取到 {len(hypotheses)} 个假设")
             except Exception as e:
                 print(f"  [EnhancedMetaAgent] 假设提取失败: {e}")
+            observability["stage_metrics"]["hypothesis_extraction_ms"] = round(
+                (time.perf_counter() - t0) * 1000.0, 2
+            )
         
         # ========== 新增：LLM 驱动的触发路径构造 ==========
         trigger_paths = []
         if self.enable_llm_trigger_path and hasattr(self, 'trigger_path_constructor'):
             print(f"  [EnhancedMetaAgent] 构造触发路径...")
+            t0 = time.perf_counter()
             try:
                 trigger_paths = self.trigger_path_constructor.construct(code_content, static_result)
                 self.enhanced_analysis_info["trigger_paths_generated"] = len(trigger_paths)
@@ -456,23 +585,32 @@ class EnhancedMetaAgent:
                     print(f"  [EnhancedMetaAgent] 生成 {len(trigger_paths)} 个触发路径")
             except Exception as e:
                 print(f"  [EnhancedMetaAgent] 触发路径构造失败: {e}")
+            observability["stage_metrics"]["trigger_path_ms"] = round(
+                (time.perf_counter() - t0) * 1000.0, 2
+            )
         
         if slice_result["suspicious_count"] == 0:
             _progress(4, "验证与报告")
             result = self._empty_result(static_result, slice_result, file_info)
             result["enhanced_analysis"] = self.enhanced_analysis_info
+            result = self._finalize_result(result)
+            observability["stage_metrics"]["total_analysis_ms"] = round((time.perf_counter() - analyze_start) * 1000.0, 2)
+            result = self._attach_observability(result, observability)
             if self.use_cache:
                 with self._analysis_cache_lock:
                     self.analysis_cache[cache_key] = result
             return result
         
         # 3. Evidence scoring
+        t0 = time.perf_counter()
         candidate_cwes = set(slice_result.get("slices_by_cwe", {}).keys())
         evidence_scores = {}
         
         for cwe in candidate_cwes:
             score_item = self.evidence_scorer.score(cwe, static_result, slice_result, code_content)
             evidence_scores[cwe] = score_item
+        observability["counts"]["candidate_cwes"] = len(candidate_cwes)
+        observability["stage_metrics"]["evidence_scoring_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         
         # Filter CWE types for LLM analysis
         llm_input_slices = {}
@@ -480,11 +618,15 @@ class EnhancedMetaAgent:
             s = evidence_scores.get(cwe, {"score": 0})
             if self.evidence_scorer.should_enter_llm(s):
                 llm_input_slices[cwe] = c_slice
+        observability["counts"]["llm_input_slices"] = len(llm_input_slices)
         
         if not llm_input_slices:
             _progress(4, "验证与报告")
             result = self._empty_result(static_result, slice_result, file_info)
             result["enhanced_analysis"] = self.enhanced_analysis_info
+            result = self._finalize_result(result)
+            observability["stage_metrics"]["total_analysis_ms"] = round((time.perf_counter() - analyze_start) * 1000.0, 2)
+            result = self._attach_observability(result, observability)
             if self.use_cache:
                 with self._analysis_cache_lock:
                     self.analysis_cache[cache_key] = result
@@ -496,6 +638,7 @@ class EnhancedMetaAgent:
 
         # 4. Specialized LLM analysis
         _progress(3, "LLM 推理")
+        t0 = time.perf_counter()
         # Replace global prefix context with sink-window context for large files (C/Java).
         effective_context = _build_sink_window_context(code_content, slice_result)
         llm_results = self._process_with_specialized_agents(
@@ -504,6 +647,7 @@ class EnhancedMetaAgent:
             static_result=static_result,
             slice_result=slice_result,
         )
+        observability["counts"]["llm_results_before_filter"] = len(llm_results)
         
         # Filter low evidence results
         filtered_llm = []
@@ -565,11 +709,16 @@ class EnhancedMetaAgent:
                 filtered_llm.append(r)
         
         llm_results = filtered_llm
+        observability["counts"]["llm_results_after_filter"] = len(llm_results)
+        observability["stage_metrics"]["llm_inference_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         
         if not llm_results:
             _progress(4, "验证与报告")
             result = self._empty_result(static_result, slice_result, file_info)
             result["enhanced_analysis"] = self.enhanced_analysis_info
+            result = self._finalize_result(result)
+            observability["stage_metrics"]["total_analysis_ms"] = round((time.perf_counter() - analyze_start) * 1000.0, 2)
+            result = self._attach_observability(result, observability)
             if self.use_cache:
                 with self._analysis_cache_lock:
                     self.analysis_cache[cache_key] = result
@@ -581,22 +730,28 @@ class EnhancedMetaAgent:
         if trigger_paths:
             llm_results = self._enrich_reports_with_trigger_paths(llm_results, trigger_paths)
         
-        # 5. 假设验证（与 SpecializedMetaAgent 一致）：合并静态结果与切片结果，供证据与 LLM 验证使用
+        # 5. 假设验证：合并静态结果与切片结果，供证据与 LLM 验证使用
         _progress(4, "验证与报告")
+        t0 = time.perf_counter()
         validator_ctx = {**static_result, **slice_result}
         validated_results = self.validator_agent.process(
             llm_results, code_content, validator_ctx
         )
+        observability["stage_metrics"]["validation_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        observability["counts"]["validated_results"] = len(validated_results)
         
         # 更新验证通过数量
         self.enhanced_analysis_info["two_phase_validation_passed"] = len(validated_results)
         
         # 6. Generate report
+        t0 = time.perf_counter()
         report = self.report_agent.process(validated_results, file_info, static_result)
+        observability["stage_metrics"]["report_generation_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         # Surface LLM errors to report for UI alert banner.
         llm_errors = slice_result.get("_llm_errors") if isinstance(slice_result, dict) else None
         if llm_errors:
             report["llm_errors"] = llm_errors
+        observability["counts"]["llm_error_count"] = len(llm_errors or [])
         
         result = {
             "static": static_result,
@@ -606,6 +761,12 @@ class EnhancedMetaAgent:
             "report": report,
             "enhanced_analysis": self.enhanced_analysis_info
         }
+        result = self._finalize_result(result)
+        observability["counts"]["report_vulnerability_count"] = int(
+            (report.get("total_vulnerabilities", 0) or 0)
+        )
+        observability["stage_metrics"]["total_analysis_ms"] = round((time.perf_counter() - analyze_start) * 1000.0, 2)
+        result = self._attach_observability(result, observability)
         
         # Cache result
         if self.use_cache:
@@ -644,79 +805,3 @@ class EnhancedMetaAgent:
     def get_enhanced_analysis_info(self) -> Dict:
         """获取增强分析信息"""
         return self.enhanced_analysis_info
-
-
-# 测试函数
-def test_enhanced_agent():
-    """Test the enhanced meta agent"""
-    print("=== Testing Enhanced Meta Agent ===")
-    
-    test_code = """
-#include <stdio.h>
-#include <string.h>
-
-void vulnerable_function(char *user_input) {
-    char buffer[64];
-    // Missing boundary check - potential buffer overflow
-    strcpy(buffer, user_input);
-    printf("Buffer: %s\\n", buffer);
-}
-
-int main(int argc, char *argv[]) {
-    if (argc > 1) {
-        vulnerable_function(argv[1]);
-    }
-    return 0;
-}
-"""
-    
-    test_file = "test_enhanced.c"
-    with open(test_file, 'w') as f:
-        f.write(test_code)
-    
-    try:
-        # Initialize agent with all features enabled
-        agent = EnhancedMetaAgent(use_cache=False, 
-                                  enable_hypothesis_extraction=True,
-                                  enable_llm_trigger_path=True)
-        
-        # Analyze
-        file_info = {"file_name": test_file, "project": "test"}
-        result = agent.analyze(test_file, test_code, file_info)
-        
-        # Print results
-        print(f"\nAnalysis completed:")
-        print(f"  Sinks identified: {result['slice'].get('suspicious_count', 0)}")
-        print(f"  LLM results: {len(result['llm'])}")
-        print(f"  Validated vulnerabilities: {len(result['validation'])}")
-        
-        # Print enhanced analysis info
-        enhanced_info = result.get('enhanced_analysis', {})
-        print(f"\nEnhanced Analysis Info:")
-        if enhanced_info.get("hypotheses_truncated"):
-            print(
-                f"  Hypotheses extracted: {enhanced_info.get('hypotheses_extracted', 0)} "
-                f"(truncated from {enhanced_info.get('hypotheses_raw', 0)})"
-            )
-        else:
-            print(f"  Hypotheses extracted: {enhanced_info.get('hypotheses_extracted', 0)}")
-        print(f"  Trigger paths generated: {enhanced_info.get('trigger_paths_generated', 0)}")
-        print(f"  Two-phase validation passed: {enhanced_info.get('two_phase_validation_passed', 0)}")
-        
-        if result['validation']:
-            print("\nValidated vulnerabilities:")
-            for vuln in result['validation']:
-                print(f"  - {vuln.get('cwe')} at {vuln.get('location')}")
-                if 'validation' in vuln:
-                    print(f"    Confidence: {vuln['validation'].get('confidence', 0)}")
-        
-        return result
-        
-    finally:
-        # Cleanup
-        if os.path.exists(test_file):
-            os.remove(test_file)
-
-
-if __name__ == "__main__":
-    test_enhanced_agent()

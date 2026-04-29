@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List
 
 from config import DATASET_DIR, RESULT_DIR, TEMP_DIR
+from agent import DeepSeekClient
 from dataset import DatasetLoader
 from enhanced_meta_agent import EnhancedMetaAgent
 from huggingface_dataset_mirror import System4DatasetAdapter
@@ -32,6 +33,13 @@ def save_json(data: Dict[str, Any], filepath: str) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def analyze_file(meta_agent: Any, sample, temp_dir: str) -> Dict[str, Any]:
     file_path = getattr(sample, "file_path", getattr(sample, "file_name", "unknown.c"))
     file_name = getattr(sample, "file_name", os.path.basename(file_path))
@@ -47,12 +55,18 @@ def analyze_file(meta_agent: Any, sample, temp_dir: str) -> Dict[str, Any]:
     try:
         start = time.time()
         result = meta_agent.analyze(temp_file, code, {"file_name": file_name, "project": project})
+        true_label = getattr(sample, "is_vulnerable", None)
+        if true_label is not None:
+            true_label = 1 if bool(true_label) else 0
+        pred_label = 1 if int(result.get("report", {}).get("total_vulnerabilities", 0)) > 0 else 0
         return {
             "success": True,
             "elapsed": time.time() - start,
             "file_name": file_name,
             "project": project,
             "result": result,
+            "true_label": true_label,
+            "pred_label": pred_label,
         }
     except Exception as e:
         return {"success": False, "file_name": file_name, "project": project, "error": str(e)}
@@ -60,7 +74,7 @@ def analyze_file(meta_agent: Any, sample, temp_dir: str) -> Dict[str, Any]:
 
 def load_samples(args) -> List[Any]:
     if args.source in ("primevul", "secvul"):
-        adapter = System4DatasetAdapter(use_huggingface=True, use_mirror=not args.no_mirror)
+        adapter = System4DatasetAdapter(use_huggingface=True)
         if args.source == "primevul":
             return adapter.load_primevul_balanced(
                 total_samples=max(1, int(args.samples)),
@@ -86,6 +100,22 @@ def load_samples(args) -> List[Any]:
 
 
 def run_detect_mode(args) -> None:
+    preflight_client = DeepSeekClient()
+    llm_preflight = preflight_client.preflight_health_check()
+    if llm_preflight.get("ready"):
+        selected = llm_preflight.get("selected_provider", "unknown")
+        healthy = ", ".join(llm_preflight.get("healthy_providers", []))
+        print(f"LLM preflight ready: selected={selected}, healthy=[{healthy}]")
+    else:
+        print("LLM preflight failed: no healthy provider found.")
+        print(f"Provider chain: {', '.join(llm_preflight.get('provider_chain', []))}")
+        if not args.allow_degraded_llm:
+            raise RuntimeError(
+                "LLM preflight failed and degraded mode is disabled. "
+                "请配置可用 LLM API Key，或使用 --allow-degraded-llm 继续。"
+            )
+        print("Degraded mode enabled: fallback/mock inference may be used.")
+
     samples = load_samples(args)
     if not samples:
         raise FileNotFoundError("未加载到可检测样本")
@@ -100,6 +130,8 @@ def run_detect_mode(args) -> None:
 
     reports: List[Dict[str, Any]] = []
     results: List[Dict[str, Any]] = []
+    eval_rows: List[Dict[str, int]] = []
+    observability_rows: List[Dict[str, Any]] = []
     start = time.time()
 
     def _consume(i: int, n: int, r: Dict[str, Any]) -> None:
@@ -108,9 +140,14 @@ def run_detect_mode(args) -> None:
             results.append(r)
             return
         report = r["result"]["report"]
+        obs = r["result"].get("observability", {}) if isinstance(r.get("result"), dict) else {}
         save_json(report, os.path.join(RESULT_DIR, f"{r['file_name']}.report.json"))
         reports.append(report)
         results.append(r)
+        if isinstance(obs, dict) and obs:
+            observability_rows.append(obs)
+        if r.get("true_label") in (0, 1):
+            eval_rows.append({"true_label": int(r["true_label"]), "pred_label": int(r.get("pred_label", 0))})
         print(f"[{i}/{n}] {r['file_name']} - {r['elapsed']:.2f}s, 漏洞: {report.get('total_vulnerabilities', 0)}")
 
     if args.parallel > 1 and len(samples) > 1:
@@ -130,6 +167,8 @@ def run_detect_mode(args) -> None:
         "mode": "detect",
         "language": "c",
         "source": args.source,
+        "llm_preflight": llm_preflight,
+        "allow_degraded_llm": bool(args.allow_degraded_llm),
         "total_files": len(reports),
         "total_vulnerabilities": sum(r.get("total_vulnerabilities", 0) for r in reports),
         "severity_summary": {
@@ -146,15 +185,95 @@ def run_detect_mode(args) -> None:
             "files_processed": len(reports),
         },
     }
+    if observability_rows:
+        stage_keys = [
+            "static_analysis_ms",
+            "slice_construction_ms",
+            "hypothesis_extraction_ms",
+            "trigger_path_ms",
+            "evidence_scoring_ms",
+            "llm_inference_ms",
+            "validation_ms",
+            "report_generation_ms",
+            "total_analysis_ms",
+        ]
+        count_keys = [
+            "candidate_cwes",
+            "llm_input_slices",
+            "llm_results_before_filter",
+            "llm_results_after_filter",
+            "validated_results",
+            "report_vulnerability_count",
+            "llm_error_count",
+            "schema_warning_count",
+        ]
+        stage_avg = {}
+        count_avg = {}
+        for key in stage_keys:
+            stage_avg[key] = round(
+                sum(float((x.get("stage_metrics", {}) or {}).get(key, 0.0) or 0.0) for x in observability_rows)
+                / max(1, len(observability_rows)),
+                3,
+            )
+        for key in count_keys:
+            count_avg[key] = round(
+                sum(float((x.get("counts", {}) or {}).get(key, 0.0) or 0.0) for x in observability_rows)
+                / max(1, len(observability_rows)),
+                3,
+            )
+        summary["observability"] = {
+            "files_with_metrics": len(observability_rows),
+            "cache_hit_files": sum(1 for x in observability_rows if bool(x.get("cached"))),
+            "avg_stage_metrics_ms": stage_avg,
+            "avg_counts_per_file": count_avg,
+        }
     for report in reports:
         for cwe, count in report.get("vulnerabilities_by_cwe", {}).items():
             summary["cwe_summary"][cwe] = summary["cwe_summary"].get(cwe, 0) + count
+
+    if eval_rows:
+        tp = sum(1 for x in eval_rows if x["true_label"] == 1 and x["pred_label"] == 1)
+        fp = sum(1 for x in eval_rows if x["true_label"] == 0 and x["pred_label"] == 1)
+        tn = sum(1 for x in eval_rows if x["true_label"] == 0 and x["pred_label"] == 0)
+        fn = sum(1 for x in eval_rows if x["true_label"] == 1 and x["pred_label"] == 0)
+        total = len(eval_rows)
+        precision = tp / max(1, tp + fp)
+        recall = tp / max(1, tp + fn)
+        f1 = 0.0 if (precision + recall) == 0 else (2 * precision * recall) / (precision + recall)
+        accuracy = (tp + tn) / max(1, total)
+        summary["confusion_matrix"] = {
+            "labels": {"positive": "vulnerable", "negative": "safe"},
+            "tp": tp,
+            "fp": fp,
+            "tn": tn,
+            "fn": fn,
+            "total": total,
+            "metrics": {
+                "accuracy": round(accuracy, 6),
+                "precision": round(precision, 6),
+                "recall": round(recall, 6),
+                "f1": round(f1, 6),
+            },
+        }
 
     summary_file = os.path.join(RESULT_DIR, "scan_summary.json")
     save_json(summary, summary_file)
     print("\n" + "=" * 60)
     print("检测完成")
     print(f"总耗时: {elapsed:.2f}s")
+    if "confusion_matrix" in summary:
+        cm = summary["confusion_matrix"]
+        print("混淆矩阵:")
+        print(f"  TP={cm['tp']} FP={cm['fp']}")
+        print(f"  FN={cm['fn']} TN={cm['tn']}")
+        print(
+            "  Acc={:.4f} Prec={:.4f} Rec={:.4f} F1={:.4f}".format(
+                cm["metrics"]["accuracy"],
+                cm["metrics"]["precision"],
+                cm["metrics"]["recall"],
+                cm["metrics"]["f1"],
+            )
+        )
     print(f"结果目录: {RESULT_DIR}")
     print(f"汇总报告: {summary_file}")
     print("=" * 60)
@@ -193,12 +312,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-samples", type=int, default=10, help="本地模式最大处理数")
     parser.add_argument("--parallel", type=int, default=2, help="并行度")
     parser.add_argument("--no-cache", action="store_true", help="禁用缓存")
+    parser.add_argument(
+        "--allow-degraded-llm",
+        action="store_true",
+        default=_env_flag("VULDET_ALLOW_DEGRADED_LLM", False),
+        help="当 LLM preflight 失败时允许降级执行（mock/fallback）",
+    )
 
     parser.add_argument("--samples", type=int, default=20, help="数据集样本数（secvul/primevul）")
     parser.add_argument("--vuln-ratio", type=float, default=0.5, help="漏洞/安全比例")
     parser.add_argument("--split", default="train", help="HuggingFace split")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
-    parser.add_argument("--no-mirror", action="store_true", help="禁用HF镜像")
 
     parser.add_argument("--root", default=DATASET_DIR, help="scan模式：代码根目录")
     parser.add_argument("--result-dir", default=RESULT_DIR, help="scan模式：输出目录")

@@ -10,6 +10,16 @@
 - 数据集模式检测（`primevul` / `secvul`）
 - 检测结果落盘到 `result/`，便于复查与自动化集成
 
+## 检测架构
+
+项目已统一为单一检测主链路：`EnhancedMetaAgent`。
+
+- 静态分析：`StaticAnalyzerAgent`
+- 切片构造：`EnhancedSliceConstructor`
+- 漏洞推理：`SpecializedLLMAgent`（按 CWE 并行）
+- 结果验证：`HypothesisValidatorAgent`
+- 报告生成：`ReportAgent`
+
 ## 运行环境
 
 - Python 3.10+（推荐 3.12）

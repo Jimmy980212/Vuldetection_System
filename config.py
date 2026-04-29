@@ -67,9 +67,13 @@ JOERN_BAT = _joern_executable(JOERN_PATH, "joern")
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_API_URL = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions").strip()
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip()
 
-ALLOWED_LLM_PROVIDERS = frozenset({"deepseek", "qwen", "wenxin", "doubao", "kimi", "zhipu", "hunyuan"})
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
+
+ALLOWED_LLM_PROVIDERS = frozenset({"deepseek", "openai", "qwen", "wenxin", "doubao", "kimi", "zhipu", "hunyuan"})
 LLM_PROVIDER_ALIASES = {
     "moonshot": "kimi",
     "tongyi": "qwen",
@@ -100,6 +104,18 @@ _llm_base_raw = os.environ.get("LLM_API_BASE", "").strip()
 LLM_API_BASE = _llm_base_raw.rstrip("/") if _llm_base_raw else ""
 LLM_API_PATH = os.environ.get("LLM_API_PATH", "/chat/completions")
 LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
+
+
+def parse_llm_provider_chain(raw: Optional[str]) -> list[str]:
+    names = []
+    for item in (raw or "").split(","):
+        provider = normalize_llm_provider(item.strip())
+        if provider and provider not in names:
+            names.append(provider)
+    return names
+
+
+LLM_FALLBACK_PROVIDERS = parse_llm_provider_chain(os.environ.get("LLM_FALLBACK_PROVIDERS", ""))
 
 VULNERABILITY_CATEGORIES = {
     "buffer_overflow": ["CWE-119", "CWE-120", "CWE-121", "CWE-122", "CWE-124", "CWE-126"],

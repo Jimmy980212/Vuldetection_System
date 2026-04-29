@@ -20,7 +20,7 @@ class DatasetLoader:
         self.dataset_dir = dataset_dir
         self.samples = []
     
-    def load_files(self, extensions=['.c', '.cpp', '.cc', '.h', '.hpp', '.cxx', '.c++', '.java', '.py']):
+    def load_files(self, extensions=['.c', '.cpp', '.cc', '.h', '.hpp', '.cxx', '.c++']):
         """加载目录中的所有代码文件"""
         if not os.path.exists(self.dataset_dir):
             print(f"目录不存在: {self.dataset_dir}")

@@ -49,7 +49,7 @@ def _analyze_one(
         # 每个源文件的 Joern 输入都必须独立，避免并发时临时文件互相覆盖
         file_id = md5_text(os.path.abspath(file_path))[:10]
         os.makedirs(temp_dir, exist_ok=True)
-        # 保留扩展名，便于 Joern 区分 Java（javasrc2cpg）与 C/C++（joern-parse）
+        # 保留扩展名，便于 Joern 识别 C/C++ 源文件类型
         temp_file = os.path.join(temp_dir, f"{file_id}_{file_name}")
 
         # 与 main.analyze_file 一致：Joern 输入使用原始源码，不前置行号
@@ -175,6 +175,7 @@ class ProjectScanner:
         severity_summary = {"critical": 0, "high": 0, "medium": 0, "low": 0}
         cwe_summary: Dict[str, int] = {}
         results_index: List[Dict[str, Any]] = []
+        observability_rows: List[Dict[str, Any]] = []
 
         # 流式提交任务：避免一次性把所有 futures 绑在内存里
         max_inflight = max(2, self.parallel * 2)
@@ -213,13 +214,17 @@ class ProjectScanner:
                 if len(futures) >= max_inflight:
                     done, not_done = wait(futures, return_when=FIRST_COMPLETED)
                     for fut in done:
-                        self._consume_future(fut, checkpoint, _make_output_paths, results_index, severity_summary, cwe_summary)
+                        self._consume_future(
+                            fut, checkpoint, _make_output_paths, results_index, severity_summary, cwe_summary, observability_rows
+                        )
                         if fut.result().get("success"):
                             files_processed += 1
                     futures = list(not_done)
 
             for fut in as_completed(futures):
-                self._consume_future(fut, checkpoint, _make_output_paths, results_index, severity_summary, cwe_summary)
+                self._consume_future(
+                    fut, checkpoint, _make_output_paths, results_index, severity_summary, cwe_summary, observability_rows
+                )
                 if fut.result().get("success"):
                     files_processed += 1
 
@@ -242,6 +247,48 @@ class ProjectScanner:
                 "avg_time_per_file": elapsed / max(1, files_processed),
             },
         }
+        if observability_rows:
+            stage_keys = [
+                "static_analysis_ms",
+                "slice_construction_ms",
+                "hypothesis_extraction_ms",
+                "trigger_path_ms",
+                "evidence_scoring_ms",
+                "llm_inference_ms",
+                "validation_ms",
+                "report_generation_ms",
+                "total_analysis_ms",
+            ]
+            count_keys = [
+                "candidate_cwes",
+                "llm_input_slices",
+                "llm_results_before_filter",
+                "llm_results_after_filter",
+                "validated_results",
+                "report_vulnerability_count",
+                "llm_error_count",
+                "schema_warning_count",
+            ]
+            stage_avg = {}
+            count_avg = {}
+            for key in stage_keys:
+                stage_avg[key] = round(
+                    sum(float((x.get("stage_metrics", {}) or {}).get(key, 0.0) or 0.0) for x in observability_rows)
+                    / max(1, len(observability_rows)),
+                    3,
+                )
+            for key in count_keys:
+                count_avg[key] = round(
+                    sum(float((x.get("counts", {}) or {}).get(key, 0.0) or 0.0) for x in observability_rows)
+                    / max(1, len(observability_rows)),
+                    3,
+                )
+            summary["observability"] = {
+                "files_with_metrics": len(observability_rows),
+                "cache_hit_files": sum(1 for x in observability_rows if bool(x.get("cached"))),
+                "avg_stage_metrics_ms": stage_avg,
+                "avg_counts_per_file": count_avg,
+            }
 
         # 全局写入汇总文件
         save_json(summary, os.path.join(self.result_dir, "scan_summary.json"))
@@ -255,6 +302,7 @@ class ProjectScanner:
         results_index: List[Dict[str, Any]],
         severity_summary: Dict[str, int],
         cwe_summary: Dict[str, int],
+        observability_rows: List[Dict[str, Any]],
     ) -> None:
         data = fut.result()
         if not data.get("success"):
@@ -267,6 +315,7 @@ class ProjectScanner:
         report_path, full_path = make_output_paths(rel_id)
 
         report = data.get("report", {})
+        observability = (data.get("analysis", {}) or {}).get("observability", {})
         total_vulns = int(report.get("total_vulnerabilities", 0))
 
         # 落盘：报告总览 + （可选）完整中间结果
@@ -282,8 +331,11 @@ class ProjectScanner:
                 "rel_path": rel_path,
                 "report_path": report_path,
                 "total_vulnerabilities": total_vulns,
+                "observability": observability if isinstance(observability, dict) else {},
             }
         )
+        if isinstance(observability, dict) and observability:
+            observability_rows.append(observability)
 
         # 聚合 severity / CWE 统计
         for sev in ["critical", "high", "medium", "low"]:

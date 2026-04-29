@@ -4,6 +4,7 @@ Only keeps PrimeVul / SecVulEval loading required by CLI detect mode.
 """
 
 import logging
+import os
 import random
 from typing import Any, Dict, List
 
@@ -33,14 +34,14 @@ def _normalize_cwe_list(v: Any) -> List[str]:
 class System4DatasetAdapter:
     """C/C++ dataset adapter for PrimeVul and SecVulEval only."""
 
-    def __init__(self, use_huggingface: bool = True, use_mirror: bool = True):
+    def __init__(self, use_huggingface: bool = True):
         self.use_huggingface = bool(use_huggingface)
-        self.use_mirror = bool(use_mirror)
 
     def _load_hf_split(self, dataset_name: str, split: str, config_name: str = ""):
         if not self.use_huggingface:
             return []
-        apply_hf_mirror(self.use_mirror)
+        apply_hf_mirror(True)
+        logger.info("HF dataset endpoint: %s", os.environ.get("HF_ENDPOINT", ""))
         from datasets import load_dataset
 
         if config_name:

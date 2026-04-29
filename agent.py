@@ -12,9 +12,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from config import (
     DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL,
+    OPENAI_API_KEY, OPENAI_API_URL, OPENAI_MODEL,
     LLM_PROVIDER, LLM_API_KEY, LLM_API_BASE, LLM_API_PATH, LLM_MODEL,
-    VULNERABILITY_CATEGORIES, VULN_KEYWORDS,
-    normalize_llm_provider,
+    LLM_FALLBACK_PROVIDERS, normalize_llm_provider,
 )
 from joern_utils import JoernHandler
 
@@ -27,11 +27,11 @@ class DeepSeekClient:
     
     def __init__(self):
         self.provider = normalize_llm_provider(LLM_PROVIDER)
-        self.api_key, self.api_url, self.model = self._resolve_provider_config()
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        self.provider_chain = self._resolve_provider_chain()
+        self.active_provider = self.provider_chain[0]["provider"] if self.provider_chain else self.provider
+        self.api_key = self.provider_chain[0]["api_key"] if self.provider_chain else ""
+        self.api_url = self.provider_chain[0]["api_url"] if self.provider_chain else ""
+        self.model = self.provider_chain[0]["model"] if self.provider_chain else ""
         self.conversation_history = []
         self.cache = {}  # 添加缓存
         self._cache_lock = threading.Lock()
@@ -44,10 +44,18 @@ class DeepSeekClient:
         # Last error info (for UI diagnostics)
         self.last_error = None
 
-    def _resolve_provider_config(self):
-        # 仅国产 LLM；与 config.ALLOWED_LLM_PROVIDERS / 前端 PROVIDERS 一致
+    @staticmethod
+    def _build_headers(api_key: str):
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+    def _resolve_provider_config(self, provider_name: str):
+        provider = normalize_llm_provider(provider_name)
         provider_presets = {
-            "deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"),
+            "deepseek": ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
+            "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
             "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
             "wenxin": ("https://qianfan.baidubce.com/v2", "ernie-speed-128k"),
             "doubao": ("https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-32k"),
@@ -56,24 +64,42 @@ class DeepSeekClient:
             "hunyuan": ("https://api.hunyuan.cloud.tencent.com/v1", "hunyuan-turbo"),
         }
         preset_base, preset_model = provider_presets.get(
-            self.provider,
-            ("https://api.deepseek.com/v1", "deepseek-chat"),
+            provider,
+            ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
         )
 
-        # 兼容历史配置：若仍在使用 DEEPSEEK_API_URL，优先沿用它（provider=deepseek 时）
-        if self.provider == "deepseek" and DEEPSEEK_API_URL:
+        # Provider-specific compatibility
+        if provider == "deepseek" and DEEPSEEK_API_URL:
             api_url = DEEPSEEK_API_URL
+        elif provider == "openai" and OPENAI_API_URL:
+            api_url = OPENAI_API_URL
         else:
             base = (LLM_API_BASE or "").rstrip("/") or preset_base
             path = LLM_API_PATH if str(LLM_API_PATH).startswith("/") else f"/{LLM_API_PATH}"
             api_url = f"{base}{path}"
         explicit_model = (LLM_MODEL or "").strip()
-        if self.provider == "deepseek" and not explicit_model:
+        if provider == "deepseek" and not explicit_model:
             model = (DEEPSEEK_MODEL or "").strip() or preset_model
+        elif provider == "openai" and not explicit_model:
+            model = (OPENAI_MODEL or "").strip() or preset_model
         else:
             model = explicit_model or preset_model
-        api_key = LLM_API_KEY or DEEPSEEK_API_KEY
-        return api_key, api_url, model
+        if provider == "openai":
+            api_key = LLM_API_KEY or OPENAI_API_KEY
+        else:
+            api_key = LLM_API_KEY or DEEPSEEK_API_KEY
+        return {"provider": provider, "api_key": api_key, "api_url": api_url, "model": model}
+
+    def _resolve_provider_chain(self):
+        chain = []
+        seen = set()
+        for provider in [self.provider] + list(LLM_FALLBACK_PROVIDERS or []):
+            normalized = normalize_llm_provider(provider)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            chain.append(self._resolve_provider_config(normalized))
+        return chain
     
     def chat(self, prompt, system_prompt="你是一个专业的代码安全分析专家", temperature=0.1, use_cache=True):
         """调用DeepSeek API - 带缓存"""
@@ -89,57 +115,77 @@ class DeepSeekClient:
                     return self.cache[cache_key]
                 self.cache_misses += 1
         
-        if (not self.api_key) or self.api_key == "your-api-key-here":
+        has_usable_provider = any(
+            item.get("api_key") and item.get("api_key") != "your-api-key-here"
+            for item in self.provider_chain
+        )
+        if not has_usable_provider:
             response = self._mock_response(prompt)
             if use_cache:
                 with self._cache_lock:
                     self.cache[cache_key] = response
             return response
-        
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": temperature,
-            "max_tokens": 4000
-        }
-        
-        start_time = time.time()
-        try:
-            with self._cache_lock:
-                self.api_calls += 1
-            response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=120)
-            response_time = time.time() - start_time
-            with self._cache_lock:
-                self.total_response_time += response_time
-            
-            if response.status_code == 200:
-                self.last_error = None
-                content = response.json()["choices"][0]["message"]["content"]
-                # 保存到缓存
-                if use_cache:
-                    with self._cache_lock:
-                        self.cache[cache_key] = content
-                return content
-            else:
-                # Fallback to mock so downstream parsers still get JSON.
-                self.last_error = {"type": "http", "status": int(response.status_code), "provider": self.provider}
-                print(f"API调用失败: {response.status_code} ({self.provider})")
-                content = self._mock_response(prompt)
-                if use_cache:
-                    with self._cache_lock:
-                        self.cache[cache_key] = content
-                return content
-        except Exception as e:
-            print(f"API调用异常: {e}")
-            self.last_error = {"type": "exception", "message": str(e), "provider": self.provider}
-            response = self._mock_response(prompt)
-            if use_cache:
+
+        provider_errors = []
+        for provider_cfg in self.provider_chain:
+            api_key = provider_cfg.get("api_key", "")
+            if not api_key or api_key == "your-api-key-here":
+                continue
+
+            self.active_provider = provider_cfg.get("provider", "unknown")
+            self.api_key = api_key
+            self.api_url = provider_cfg.get("api_url", "")
+            self.model = provider_cfg.get("model", "")
+            headers = self._build_headers(self.api_key)
+
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": temperature,
+                "max_tokens": 4000
+            }
+
+            start_time = time.time()
+            try:
                 with self._cache_lock:
-                    self.cache[cache_key] = response
-            return response
+                    self.api_calls += 1
+                response = requests.post(self.api_url, headers=headers, json=payload, timeout=120)
+                response_time = time.time() - start_time
+                with self._cache_lock:
+                    self.total_response_time += response_time
+
+                if response.status_code == 200:
+                    self.last_error = None
+                    content = response.json()["choices"][0]["message"]["content"]
+                    if use_cache:
+                        with self._cache_lock:
+                            self.cache[cache_key] = content
+                    return content
+
+                provider_errors.append({
+                    "type": "http",
+                    "status": int(response.status_code),
+                    "provider": self.active_provider,
+                })
+                print(f"API调用失败: {response.status_code} ({self.active_provider})")
+            except Exception as e:
+                provider_errors.append({
+                    "type": "exception",
+                    "message": str(e),
+                    "provider": self.active_provider,
+                })
+                print(f"API调用异常: {e}")
+
+        # Fallback to mock so downstream parsers still get JSON.
+        self.last_error = provider_errors[-1] if provider_errors else {"type": "no_provider_available"}
+        response = self._mock_response(prompt)
+        if use_cache:
+            with self._cache_lock:
+                self.cache[cache_key] = response
+        return response
     
     def batch_chat(self, prompts, system_prompt="你是一个专业的代码安全分析专家", temperature=0.1, max_workers=12):
         """批量调用API - 并行处理"""
@@ -171,6 +217,27 @@ class DeepSeekClient:
             "cache_size": len(self.cache),
             "api_calls": self.api_calls,
             "avg_response_time": self.total_response_time / max(1, self.api_calls)
+        }
+
+    def preflight_health_check(self) -> Dict[str, Any]:
+        healthy = []
+        unavailable = []
+        for cfg in self.provider_chain:
+            provider = cfg.get("provider", "unknown")
+            api_key = str(cfg.get("api_key", "") or "").strip()
+            api_url = str(cfg.get("api_url", "") or "").strip()
+            model = str(cfg.get("model", "") or "").strip()
+            if api_key and api_key != "your-api-key-here" and api_url and model:
+                healthy.append(provider)
+            else:
+                unavailable.append(provider)
+        selected = healthy[0] if healthy else None
+        return {
+            "ready": bool(healthy),
+            "selected_provider": selected,
+            "healthy_providers": healthy,
+            "unavailable_providers": unavailable,
+            "provider_chain": [x.get("provider", "unknown") for x in self.provider_chain],
         }
     
     def _mock_response(self, prompt):
@@ -443,309 +510,6 @@ class EvidenceScorer:
         if cwe == "CWE-22":
             return "fopen" in joined or ".." in joined
         return False
-
-class SliceConstructorAgent:
-    """切片构造Agent - 优化版（支持正则表达式模式）"""
-    
-    # 当配置内关键词未覆盖时，对单函数/片段做兜底（仅高危 API/IO，避免 NULL/sizeof/SSL 等泛化词误伤安全样本）
-    _FALLBACK_C_SECURITY = re.compile(
-        r"memcpy|memmove|strcpy|strcat|strncpy|strncat|sprintf|snprintf|vsprintf|vsnprintf|gets|"
-        r"malloc|calloc|realloc|free\s*\(|"
-        r"read\(|write\(|recv|recvfrom|send|sendto|socket\(|fopen|open\s*\(|"
-        r"fprintf|printf|syslog|snprintf|"
-        r"kmalloc|kfree|copy_from_user|get_user|__user",
-        re.IGNORECASE,
-    )
-
-    # 广义兜底：PrimeVul 中大量语义类漏洞（CWE-200/CWE-399/CWE-835/CWE-20/CWE-189 等），
-    # 几乎所有 C 函数都满足，因此对"代码量够大"的函数级样本直接触发宽松兜底分析。
-    _FALLBACK_SEMANTIC_MIN_LINES = 10  # 超过这么多行即触发语义兜底
-
-    # 语义类CWE列表，用于宽松兜底时分配分析目标
-    _SEMANTIC_FALLBACK_CWES = [
-        "CWE-200", "CWE-399", "CWE-835", "CWE-20", "CWE-189",
-        "CWE-209", "CWE-125", "CWE-416", "CWE-476",
-    ]
-
-    def __init__(self):
-        self.name = "SliceConstructorAgent"
-        self.vuln_keywords = VULN_KEYWORDS
-        self.min_context_lines = 2
-        # 每个 CWE 最多选择多少个"可疑出现点"进入切片
-        # 过多切片会让 LLM 更容易"看到危险模式"从而产生误报
-        self.large_file_lines = int(os.environ.get("VULN_LARGE_FILE_LINES", "2000"))
-        self.max_suspicious_per_cwe = int(os.environ.get("VULN_MAX_SUSPICIOUS_PER_CWE", "3"))
-        self.max_suspicious_per_cwe_large = int(os.environ.get("VULN_MAX_SUSPICIOUS_PER_CWE_LARGE", "20"))
-        
-        # 预编译正则表达式 - 支持原始正则模式
-        self.keyword_patterns = {}
-        for cwe, keywords in self.vuln_keywords.items():
-            if keywords:  # 跳过空列表
-                # 对于正则表达式模式，我们不使用 re.escape
-                pattern = '|'.join(keywords)
-                try:
-                    self.keyword_patterns[cwe] = re.compile(pattern, re.IGNORECASE)
-                except re.error as e:
-                    print(f"警告: CWE {cwe} 的正则表达式编译失败: {e}")
-                    # 使用简单的字符串匹配作为后备
-                    escaped_keywords = [re.escape(kw) for kw in keywords if kw]
-                    if escaped_keywords:
-                        pattern = '|'.join(escaped_keywords)
-                        self.keyword_patterns[cwe] = re.compile(pattern, re.IGNORECASE)
-        
-        # 通用模式 - 用于快速预过滤
-        all_patterns = []
-        for cwe, pattern_obj in self.keyword_patterns.items():
-            all_patterns.append(pattern_obj.pattern)
-        
-        if all_patterns:
-            combined_pattern = '|'.join(all_patterns)
-            self.general_pattern = re.compile(combined_pattern, re.IGNORECASE)
-        else:
-            self.general_pattern = None
-    
-    def process(self, code, static_info):
-        """构造代码切片 - 使用预编译正则"""
-        print(f"  [SliceConstructor] 构造代码切片")
-        
-        lines = code.split('\n')
-        is_large = len(lines) >= self.large_file_lines
-        max_per_cwe = self.max_suspicious_per_cwe_large if is_large else self.max_suspicious_per_cwe
-        
-        # 快速预过滤：若未命中配置关键词，尝试宽松 C/安全相关兜底（常见于 HuggingFace 函数级样本）
-        if self.general_pattern is None or not self.general_pattern.search(code):
-            # 原有兜底：低级C安全函数触发 CWE-119 分析
-            if self._FALLBACK_C_SECURITY.search(code):
-                fb = (
-                    "=== CWE-119 heuristic_fallback (config keywords missed; still review) ===\n"
-                    + "\n".join(f"{i+1}: {ln}" for i, ln in enumerate(lines[:120]))
-                )
-                print(f"  [SliceConstructor] 使用宽松兜底切片（heuristic_fallback）")
-                first_ln = lines[0][:200] if lines else ""
-                return {
-                    "suspicious_count": 1,
-                    "slices_by_cwe": {"CWE-119": fb},
-                    "code_slice": fb,
-                    "suspicious_lines": {"CWE-119": [(1, first_ln)]},
-                    "data_flow_info": static_info.get("data_flow_info", ""),
-                    "call_graph_info": static_info.get("call_graph_info", ""),
-                    "heuristic_fallback": True,
-                }
-            # 语义类兜底：只要代码行数够多，对 PrimeVul 语义类漏洞触发宽松分析
-            # 避免 CWE-200/CWE-399/CWE-835 等在切片阶段就被完全丢弃
-            if len(lines) >= self._FALLBACK_SEMANTIC_MIN_LINES:
-                # 为多个语义类CWE生成同一段代码的兜底切片
-                slices_by_cwe = {}
-                code_preview = "\n".join(f"{i+1}: {ln}" for i, ln in enumerate(lines[:100]))
-                for sem_cwe in self._SEMANTIC_FALLBACK_CWES:
-                    slices_by_cwe[sem_cwe] = (
-                        f"=== {sem_cwe} semantic_fallback (broad analysis) ===\n{code_preview}"
-                    )
-                first_ln = lines[0][:200] if lines else ""
-                suspicious_lines = {cwe: [(1, first_ln)] for cwe in self._SEMANTIC_FALLBACK_CWES}
-                print(f"  [SliceConstructor] 使用语义类宽松兜底切片（semantic_fallback, {len(slices_by_cwe)} CWEs）")
-                return {
-                    "suspicious_count": len(self._SEMANTIC_FALLBACK_CWES),
-                    "slices_by_cwe": slices_by_cwe,
-                    "code_slice": code_preview,
-                    "suspicious_lines": suspicious_lines,
-                    "data_flow_info": static_info.get("data_flow_info", ""),
-                    "call_graph_info": static_info.get("call_graph_info", ""),
-                    "heuristic_fallback": True,
-                    "semantic_fallback": True,
-                }
-            print(f"  [SliceConstructor] 未发现可疑代码")
-            return {
-                "suspicious_count": 0,
-                "slices_by_cwe": {},
-                "code_slice": "",
-                "suspicious_lines": {},
-                "data_flow_info": static_info.get("data_flow_info", ""),
-                "call_graph_info": static_info.get("call_graph_info", "")
-            }
-        
-        # 按CWE类型分组查找可疑行
-        suspicious_by_cwe = {}
-        
-        for line_num, line in enumerate(lines, 1):
-            # 快速跳过空行和注释行
-            line_stripped = line.strip()
-            if not line_stripped or line_stripped.startswith(('//', '/*', '*', '#include')):
-                continue
-
-            # 使用预编译正则
-            for cwe, pattern in self.keyword_patterns.items():
-                if pattern.search(line):
-                    if cwe not in suspicious_by_cwe:
-                        suspicious_by_cwe[cwe] = []
-                    if not any(l[0] == line_num for l in suspicious_by_cwe[cwe]):
-                        suspicious_by_cwe[cwe].append((line_num, line_stripped))
-        
-        # 语义切片优先：从 source->sink 数据流构造证据片段
-        semantic_by_cwe = self._build_semantic_slices(lines, static_info)
-
-        # 构造切片：包含上下文
-        slices_by_cwe = {}
-        
-        all_cwes = sorted(set(list(suspicious_by_cwe.keys()) + list(semantic_by_cwe.keys())))
-        for cwe in all_cwes:
-            slice_lines = []
-            suspicious_lines = suspicious_by_cwe.get(cwe, [])
-            suspicious_lines.sort(key=lambda x: x[0])
-
-            # 先拼接语义切片（source->sink 路径片段）
-            for sem in semantic_by_cwe.get(cwe, [])[:2]:
-                slice_lines.append(f"=== {cwe} 语义路径片段 ===")
-                if sem.get("source"):
-                    slice_lines.append(f"  source: {sem.get('source')}")
-                if sem.get("target"):
-                    slice_lines.append(f"  sink: {sem.get('target')}")
-                if sem.get("path"):
-                    slice_lines.append(f"  path: {sem.get('path')}")
-                if sem.get("snippet"):
-                    slice_lines.append(sem.get("snippet"))
-                slice_lines.append("")
-            
-            selected = self._select_suspicious_lines(suspicious_lines, max_per_cwe)
-            for line_no, content in selected:
-                start = max(0, line_no - self.min_context_lines - 1)
-                end = min(len(lines), line_no + self.min_context_lines)
-                
-                slice_lines.append(f"=== {cwe} 可疑位置 {line_no} ===")
-                for j in range(start, end):
-                    prefix = "→ " if j+1 == line_no else "  "
-                    slice_lines.append(f"{prefix}{j+1}: {lines[j]}")
-                slice_lines.append("")
-            
-            if slice_lines:
-                slices_by_cwe[cwe] = "\n".join(slice_lines)
-        
-        if not slices_by_cwe:
-            print(f"  [SliceConstructor] 未发现可疑代码")
-            return {
-                "suspicious_count": 0,
-                "slices_by_cwe": {},
-                "code_slice": "",
-                "suspicious_lines": {},
-                "data_flow_info": static_info.get("data_flow_info", ""),
-                "call_graph_info": static_info.get("call_graph_info", "")
-            }
-        
-        return {
-            "suspicious_count": sum(len(v) for v in suspicious_by_cwe.values()) + sum(len(v) for v in semantic_by_cwe.values()),
-            "slices_by_cwe": slices_by_cwe,
-            "code_slice": list(slices_by_cwe.values())[0] if slices_by_cwe else "",
-            "suspicious_lines": suspicious_by_cwe,
-            "semantic_evidence_by_cwe": semantic_by_cwe,
-            "data_flow_info": static_info.get("data_flow_info", ""),
-            "call_graph_info": static_info.get("call_graph_info", "")
-        }
-
-    def _build_semantic_slices(self, lines, static_info):
-        data_flows = static_info.get("data_flows", []) or []
-        semantic = {}
-        for flow in data_flows[:60]:
-            src = str(flow.get("source", ""))
-            tgt = str(flow.get("target", ""))
-            cwe = self._infer_cwe_from_flow(src, tgt)
-            if not cwe:
-                continue
-
-            src_ln = self._find_line_no(lines, src)
-            tgt_ln = self._find_line_no(lines, tgt)
-            anchor = tgt_ln if tgt_ln else src_ln
-            snippet = ""
-            if anchor:
-                start = max(0, anchor - 3)
-                end = min(len(lines), anchor + 2)
-                buf = []
-                for i in range(start, end):
-                    prefix = "→ " if i + 1 == anchor else "  "
-                    buf.append(f"{prefix}{i+1}: {lines[i]}")
-                snippet = "\n".join(buf)
-
-            entry = {
-                "source": src[:120],
-                "target": tgt[:120],
-                "path": f"{src[:40]} -> {tgt[:40]}",
-                "source_line": src_ln,
-                "target_line": tgt_ln,
-                "snippet": snippet
-            }
-            semantic.setdefault(cwe, []).append(entry)
-        return semantic
-
-    def _infer_cwe_from_flow(self, src: str, tgt: str):
-        joined = f"{src} {tgt}".lower()
-        if any(k in joined for k in ["strcpy", "strcat", "sprintf", "memcpy", "memmove", "copy_from_user", "ib_copy_from_udata"]):
-            return "CWE-119"
-        if any(k in joined for k in ["printf", "fprintf", "snprintf"]) or "%" in joined:
-            return "CWE-134"
-        if any(k in joined for k in ["system", "exec", "popen"]):
-            return "CWE-78"
-        if "fopen" in joined:
-            return "CWE-22"
-        return ""
-
-    def _find_line_no(self, lines, token: str):
-        t = (token or "").strip()
-        if not t:
-            return 0
-        # 选取有辨识度的片段，避免完整 token 太长无法匹配
-        key = t.split()[-1][:32].lower()
-        if not key:
-            return 0
-        for i, line in enumerate(lines, 1):
-            if key in line.lower():
-                return i
-        return 0
-
-    def _select_suspicious_lines(self, suspicious_lines, max_count):
-        """
-        从按行号排序后的可疑点中均匀采样（包含首尾），避免只覆盖前段导致漏报。
-        """
-        if not suspicious_lines:
-            return []
-        if len(suspicious_lines) <= max_count:
-            return suspicious_lines
-        if max_count <= 1:
-            return [suspicious_lines[0]]
-
-        n = len(suspicious_lines)
-        # 关键：保留旧版策略必选的前 3 个点（不降低原召回），再补均匀覆盖
-        must_take = min(3, max_count)
-        selected_indices = set(range(must_take))
-        selected_indices.add(n - 1)  # 也保留尾部点，提升覆盖末尾
-
-        remaining_slots = max_count - len(selected_indices)
-        if remaining_slots <= 0:
-            # 截断为 max_count，确保输出长度
-            return [suspicious_lines[i] for i in sorted(selected_indices)[:max_count]]
-
-        # 均匀采样补全剩余下标（跳过已选的）
-        candidate_indices = [
-            int(round(i * (n - 1) / float(max_count - 1))) for i in range(max_count)
-        ]
-        # 去重并按顺序遍历，取够 remaining_slots
-        ordered = []
-        seen = set()
-        for idx in candidate_indices:
-            if 0 <= idx < n and idx not in seen:
-                ordered.append(idx)
-                seen.add(idx)
-
-        for idx in ordered:
-            if len(selected_indices) >= max_count:
-                break
-            selected_indices.add(idx)
-        # 仍可能不足（极端情况下），用从左到右补齐
-        if len(selected_indices) < max_count:
-            for idx in range(n):
-                if len(selected_indices) >= max_count:
-                    break
-                selected_indices.add(idx)
-
-        return [suspicious_lines[i] for i in sorted(selected_indices)[:max_count]]
 
 class SpecializedLLMAgent:
     """专门化LLM推理Agent - 每个实例只处理一种CWE类型"""
@@ -1138,259 +902,6 @@ class SpecializedLLMAgent:
         return results
 
 
-class LLMReasoningAgent:
-    """LLM推理Agent - 优化版（批处理+缓存）"""
-    
-    def __init__(self):
-        self.llm = DeepSeekClient()
-        self.name = "LLMReasoningAgent"
-        # 降低全局置信度阈值以提升召回率（语义类CWE往往置信度较低）
-        self.confidence_threshold = 60
-        
-        # 缓存
-        self.prompt_cache = {}
-        
-        # 完整的CWE描述缓存
-        self.cwe_descriptions = {
-            # 缓冲区溢出相关
-            "CWE-119": "缓冲区溢出：内存操作未检查边界",
-            "CWE-120": "缓冲区复制无边界检查",
-            "CWE-121": "栈缓冲区溢出",
-            "CWE-122": "堆缓冲区溢出",
-            
-            # 内存管理相关
-            "CWE-401": "内存泄漏",
-            "CWE-404": "资源未正确释放",
-            "CWE-415": "双重释放",
-            "CWE-416": "释放后使用",
-            "CWE-590": "释放非堆内存",
-            "CWE-762": "内存释放不匹配",
-            
-            # 指针相关
-            "CWE-476": "空指针解引用",
-            "CWE-690": "未检查返回值导致空指针解引用",
-            "CWE-252": "未检查返回值",
-            
-            # 整数相关
-            "CWE-190": "整数溢出或回绕",
-            "CWE-191": "整数下溢",
-            "CWE-194": "未预期的符号扩展",
-            "CWE-195": "有符号到无符号转换错误",
-            "CWE-197": "数值截断错误",
-            
-            # 注入相关
-            "CWE-77": "命令注入",
-            "CWE-78": "OS命令注入",
-            "CWE-89": "SQL注入",
-            
-            # 路径相关
-            "CWE-22": "路径遍历",
-            "CWE-23": "相对路径遍历",
-            "CWE-59": "链接跟随",
-            
-            # 格式化字符串
-            "CWE-134": "格式化字符串漏洞",
-            
-            # 并发相关
-            "CWE-362": "竞态条件",
-            "CWE-367": "检查时间与使用时间竞争",
-            
-            # 文件处理
-            "CWE-377": "不安全的临时文件",
-            "CWE-378": "不安全的临时文件创建",
-            
-            # 硬编码凭证
-            "CWE-259": "硬编码密码",
-            "CWE-321": "硬编码加密密钥",
-            "CWE-798": "硬编码凭证",
-            
-            # 加密相关
-            "CWE-326": "不充分的加密强度",
-            "CWE-327": "已损坏或有风险的加密算法",
-            "CWE-328": "可逆的单向哈希",
-            
-            # 类型相关
-            "CWE-704": "不正确的类型转换",
-            "CWE-843": "类型混淆",
-            
-            # 数组相关
-            "CWE-129": "数组索引验证不正确",
-            
-            # 除零错误
-            "CWE-369": "除零错误",
-            
-            # 初始化相关
-            "CWE-456": "缺少初始化",
-            "CWE-457": "使用未初始化变量",
-            "CWE-665": "不正确的初始化",
-        }
-    
-    def process(
-        self,
-        slices_by_cwe,
-        full_code_context="",
-        static_result: dict = None,
-        slice_result: dict = None,
-    ):
-        """执行LLM漏洞推理 - 批处理优化"""
-        print(f"  [LLMReasoning] 调用DeepSeek分析多类型漏洞...")
-        
-        if not slices_by_cwe:
-            return []
-        
-        slice_result = slice_result or {}
-        use_relaxed_conf = bool(slice_result.get("heuristic_fallback"))
-        conf_floor = 50 if use_relaxed_conf else self.confidence_threshold
-        
-        all_results = []
-        
-        # 准备批量提示（一个 CWE 的切片可能会拆成多个子块分别推理）
-        prompts = []
-        cwe_types = []
-
-        for cwe_type, code_slice in slices_by_cwe.items():
-            if len(code_slice) < 50:  # 跳过太短的切片
-                continue
-
-            chunks = self._split_slice_to_chunks(code_slice, max_chars=1200)
-            for chunk in chunks:
-                prompt = self._build_specific_prompt(
-                    cwe_type,
-                    chunk,
-                    full_code_context,
-                    static_result=static_result,
-                )
-                prompts.append(prompt)
-                cwe_types.append(cwe_type)
-        
-        # 批量调用API（最多3个并行）
-        if prompts:
-            responses = self.llm.batch_chat(prompts, max_workers=12)
-            
-            for i, response in enumerate(responses):
-                results = self._parse_response(response, cwe_types[i])
-                if results:
-                    filtered_results = [
-                        r
-                        for r in results
-                        if r.get("confidence", 70 if use_relaxed_conf else 0) >= conf_floor
-                    ]
-                    all_results.extend(filtered_results)
-        
-        print(f"  [LLMReasoning] 发现 {len(all_results)} 个真实漏洞")
-        return all_results
-
-
-    def _split_slice_to_chunks(self, code_slice, max_chars=1200):
-        """
-        按"=== {cwe} 可疑位置 ... ==="块切分，避免原先整体截断导致后半段漏报。
-        """
-        if len(code_slice) <= max_chars:
-            return [code_slice]
-
-        # 找到所有块起始位置（行首 ===）
-        starts = [m.start() for m in re.finditer(r'(?m)^===\s+.*?\s+可疑位置\s+\d+\s+===', code_slice)]
-        if not starts:
-            # 兜底：按字符切片
-            chunks = []
-            i = 0
-            while i < len(code_slice):
-                chunks.append(code_slice[i:i + max_chars])
-                i += max_chars
-            return chunks
-
-        starts.sort()
-        chunks = []
-        cur = ""
-        for si, start in enumerate(starts):
-            end = starts[si + 1] if si + 1 < len(starts) else len(code_slice)
-            block = code_slice[start:end].strip() + "\n"
-            if not cur:
-                # 如果单块超长，直接切分，避免 chunk 再次超出预算
-                if len(block) > max_chars:
-                    chunks.extend([block[i:i + max_chars] for i in range(0, len(block), max_chars)])
-                    cur = ""
-                    continue
-                cur = block
-                continue
-            if len(cur) + len(block) > max_chars:
-                chunks.append(cur)
-                if len(block) > max_chars:
-                    # 新块也超长：切分后直接追加，cur 置空重新累计
-                    chunks.extend([block[i:i + max_chars] for i in range(0, len(block), max_chars)])
-                    cur = ""
-                else:
-                    cur = block
-            else:
-                cur += block
-        if cur:
-            chunks.append(cur)
-        return chunks
-    
-    def _build_specific_prompt(self, cwe_type, code_slice, context, static_result: dict = None):
-        """构建特定CWE类型的分析提示"""
-        desc = self.cwe_descriptions.get(cwe_type, f"{cwe_type}类型漏洞")
-        
-        static_hint_lines = []
-        if static_result:
-            data_flows = static_result.get("data_flows", []) or []
-            call_graph = static_result.get("call_graph", {}) or {}
-            functions = call_graph.get("functions", []) if isinstance(call_graph, dict) else []
-
-            static_hint_lines.append(f"data_flows_count: {len(data_flows)}")
-            static_hint_lines.append(f"call_graph_functions_count: {len(functions) if functions else 0}")
-        static_hint = "\n".join(static_hint_lines).strip()
-        if not static_hint:
-            static_hint = "static_info: (none)"
-
-        return f"""
-分析以下代码，检查是否存在 {desc} 漏洞：
-
-{code_slice}
-
-静态分析摘要（用于辅助判断）：
-{static_hint}
-
-请判断是否存在 {cwe_type} 类型的漏洞，返回JSON列表（只返回真实存在的漏洞）：
-[
-    {{
-        "has_vulnerability": true/false,
-        "cwe": "{cwe_type}",
-        "confidence": 0-100,
-        "location": "漏洞位置",
-        "description": "详细描述（50字以内）",
-        "suggestion": "修复建议（30字以内）",
-        "severity": "critical/high/medium/low"
-    }}
-]
-如果不存在，返回空列表[]。
-"""
-    
-    def _parse_response(self, response, default_cwe=""):
-        """解析API响应 - 快速解析"""
-        results = []
-        
-        # 快速检查是否为空响应
-        if not response or response.strip() == "[]":
-            return results
-        
-        try:
-            # 查找JSON数组
-            json_match = re.search(r'\[.*\]', response, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict) and item.get("has_vulnerability"):
-                            # 约束CWE标签：以当前推理目标(default_cwe)为准，
-                            # 防止模型在响应中"漂移"到无关CWE导致误报。
-                            item["cwe"] = default_cwe or item.get("cwe", "")
-                            results.append(item)
-        except:
-            pass
-        
-        return results
-
 class HypothesisValidatorAgent:
     """假设验证Agent - 优化版（快速验证）"""
     
@@ -1404,6 +915,7 @@ class HypothesisValidatorAgent:
         # 验证缓存
         self.validation_cache = {}
         self._cache_lock = threading.Lock()
+        self.schema_warnings = []
     
     # CWE 类型集合：语义类漏洞（无需 source->sink 数据流即可触发）
     _SEMANTIC_CWES = {
@@ -1414,6 +926,7 @@ class HypothesisValidatorAgent:
     def process(self, vuln_reports, original_code, static_info):
         """验证多个漏洞假设 - 并行验证"""
         print(f"  [HypothesisValidator] 验证 {len(vuln_reports)} 个漏洞假设...")
+        self.schema_warnings = []
 
         if not vuln_reports:
             return []
@@ -1478,12 +991,17 @@ class HypothesisValidatorAgent:
                 or structured.get("has_data_path")
                 or (structured.get("has_suspicious_anchor") and structured.get("boundary_check_missing"))
             ):
-                report["validation"] = {
+                direct_validation = {
                     "is_real": True,
                     "confidence": max(self.validation_threshold, min(95, evidence_score)),
                     "evidence": "high-structured-evidence",
                     "structured_evidence": structured
                 }
+                ok, normalized, errs = self._validate_validation_schema(direct_validation)
+                if not ok:
+                    self.schema_warnings.extend(errs)
+                    continue
+                report["validation"] = normalized
                 validated_reports.append(report)
                 continue
             
@@ -1498,9 +1016,13 @@ class HypothesisValidatorAgent:
                     validation = None
 
             if validation is not None:
-                if validation.get("is_real"):
-                    validation["structured_evidence"] = structured
-                    report["validation"] = validation
+                validation["structured_evidence"] = structured
+                ok, normalized, errs = self._validate_validation_schema(validation)
+                if not ok:
+                    self.schema_warnings.extend(errs)
+                    continue
+                if normalized.get("is_real"):
+                    report["validation"] = normalized
                     validated_reports.append(report)
                 continue
             
@@ -1526,17 +1048,59 @@ class HypothesisValidatorAgent:
                     if json_match:
                         validation = json.loads(json_match.group())
                         validation["structured_evidence"] = structured
+                        ok, normalized, errs = self._validate_validation_schema(validation)
+                        if not ok:
+                            self.schema_warnings.extend(errs)
+                            continue
                         with self._cache_lock:
-                            self.validation_cache[cache_key] = validation
+                            self.validation_cache[cache_key] = normalized
                         
-                        if validation.get("is_real") and validation.get("confidence", 0) >= self.validation_threshold:
-                            report["validation"] = validation
+                        if normalized.get("is_real") and normalized.get("confidence", 0) >= self.validation_threshold:
+                            report["validation"] = normalized
                             validated_reports.append(report)
                 except:
                     pass
         
         print(f"  [HypothesisValidator] 验证通过 {len(validated_reports)} 个漏洞")
+        if self.schema_warnings:
+            print(f"  [HypothesisValidator] schema warnings: {len(self.schema_warnings)}")
         return validated_reports
+
+    def _validate_validation_schema(self, payload: Dict[str, Any]):
+        errors = []
+        if not isinstance(payload, dict):
+            return False, {}, ["validation schema: payload must be object"]
+
+        is_real = payload.get("is_real")
+        if not isinstance(is_real, bool):
+            errors.append("validation schema: is_real must be bool")
+
+        confidence = payload.get("confidence", 0)
+        try:
+            confidence = int(float(confidence))
+        except Exception:
+            errors.append("validation schema: confidence must be number")
+            confidence = 0
+
+        evidence = str(payload.get("evidence", "") or "").strip()
+        if not evidence:
+            errors.append("validation schema: evidence is required")
+
+        structured = payload.get("structured_evidence", {})
+        if not isinstance(structured, dict):
+            errors.append("validation schema: structured_evidence must be object")
+            structured = {}
+
+        if errors:
+            return False, {}, errors
+
+        normalized = {
+            "is_real": bool(is_real),
+            "confidence": max(0, min(100, confidence)),
+            "evidence": evidence[:120],
+            "structured_evidence": structured,
+        }
+        return True, normalized, []
     
     def _build_validation_prompt(self, report, context_code, static_info, structured_evidence):
         """构建验证提示"""
@@ -1938,9 +1502,23 @@ class ReportAgent:
                 "validation": validation,
                 "evidence_chain": evidence_chain
             }
-            report["vulnerabilities"].append(vuln_entry)
-        
-        return report
+            ok_entry, normalized_entry, _ = self._validate_vulnerability_entry(vuln_entry)
+            if ok_entry:
+                report["vulnerabilities"].append(normalized_entry)
+
+        report["total_vulnerabilities"] = len(report["vulnerabilities"])
+        report["vulnerabilities_by_cwe"] = {}
+        report["severity_summary"] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        for item in report["vulnerabilities"]:
+            cwe = item.get("cwe", "unknown")
+            report["vulnerabilities_by_cwe"][cwe] = report["vulnerabilities_by_cwe"].get(cwe, 0) + 1
+            sev = item.get("severity", "medium")
+            report["severity_summary"][sev] = report["severity_summary"].get(sev, 0) + 1
+
+        ok_report, normalized_report, warnings = self._validate_report_schema(report)
+        if warnings:
+            normalized_report["schema_warnings"] = warnings
+        return normalized_report if ok_report else self._empty_report(sample_info, static_info)
     
     def _get_cwe_description(self, cwe_id):
         """获取CWE描述 - 带默认值"""
@@ -1976,332 +1554,59 @@ class ReportAgent:
                 "functions_count": len(static_info.get("call_graph", {}).get("functions", []))
             }
         }
-class SpecializedMetaAgent:
-    """专门化元Agent - 使用多个专门化LLM Agent"""
-    
-    def __init__(self, use_cache=True):
-        self.static_agent = StaticAnalyzerAgent()
-        self.slice_agent = SliceConstructorAgent()
-        self.validator_agent = HypothesisValidatorAgent()
-        self.report_agent = ReportAgent()
-        self.evidence_scorer = EvidenceScorer()
-        self.name = "SpecializedMetaAgent"
-        self.use_cache = use_cache
-        
-        # 专门化LLM Agent池
-        self.specialized_agents = {}
-        
-        # 全局分析缓存
-        self.analysis_cache = {}
-        self._analysis_cache_lock = threading.Lock()
-        
-        # 初始化专门化Agent
-        self._init_specialized_agents()
-    
-    def _init_specialized_agents(self):
-        """初始化专门化LLM Agent"""
-        # 从ReportAgent获取CWE描述
-        report_agent = ReportAgent()
-        cwe_descriptions = report_agent.cwe_descriptions
-        
-        # 创建主要CWE类型的专门化Agent
-        important_cwes = [
-            "CWE-119", "CWE-120", "CWE-121", "CWE-122", "CWE-124", "CWE-126",  # 缓冲区溢出
-            "CWE-134",  # 格式化字符串
-            "CWE-78", "CWE-77",  # 命令注入
-            "CWE-22", "CWE-23", "CWE-59",  # 路径遍历
-            "CWE-190", "CWE-191", "CWE-194", "CWE-195", "CWE-197",  # 整数问题
-            "CWE-401", "CWE-404", "CWE-415", "CWE-416",  # 内存管理
-            "CWE-476", "CWE-690", "CWE-252",  # 指针问题
-            "CWE-704", "CWE-843",  # 类型混淆
-            "CWE-129",  # 数组索引
-            "CWE-369",  # 除零错误
-            "CWE-456", "CWE-457", "CWE-665",  # 初始化问题
-            # PrimeVul特定CWE类型
-            "CWE-125",  # 数组索引验证不正确
-            "CWE-20",   # 输入验证不当
-            "CWE-189",  # 数值错误
-            "CWE-399",  # 资源管理错误
-            "CWE-835",  # 循环中的无限循环
-            "CWE-264",  # 权限、特权和访问控制
-            "CWE-209",  # 信息泄露
-        ]
-        
-        for cwe in important_cwes:
-            description = cwe_descriptions.get(cwe, f"{cwe}类型漏洞")
-            self.specialized_agents[cwe] = SpecializedLLMAgent(cwe, description)
-        
-        print(f"初始化了 {len(self.specialized_agents)} 个专门化LLM Agent")
 
-    
-    def _get_specialized_agent(self, cwe_type):
-        """获取专门化Agent，如果没有则创建通用Agent"""
-        if cwe_type in self.specialized_agents:
-            return self.specialized_agents[cwe_type]
-        
-        # 如果没有专门化Agent，创建通用Agent
-        report_agent = ReportAgent()
-        description = report_agent.cwe_descriptions.get(cwe_type, f"{cwe_type}类型漏洞")
-        agent = SpecializedLLMAgent(cwe_type, description)
-        self.specialized_agents[cwe_type] = agent
-        return agent
-    
-    def _process_with_specialized_agents(self, slices_by_cwe, full_code_context, static_result, slice_result):
-        """使用专门化Agent处理切片"""
-        print(f"  [SpecializedMetaAgent] 使用专门化Agent分析 {len(slices_by_cwe)} 种CWE类型...")
-        
-        all_results = []
-        
-        # 并行处理不同CWE类型
-        with ThreadPoolExecutor(max_workers=min(8, len(slices_by_cwe))) as executor:
-            future_to_cwe = {}
-            
-            for cwe_type, code_slice in slices_by_cwe.items():
-                if len(code_slice) < 50:
-                    continue
-                
-                # 获取专门化Agent
-                agent = self._get_specialized_agent(cwe_type)
-                
-                # 提交任务
-                future = executor.submit(
-                    agent.process,
-                    code_slice,
-                    full_code_context,
-                    static_result,
-                    slice_result
-                )
-                future_to_cwe[future] = cwe_type
-            
-            # 收集结果
-            for future in as_completed(future_to_cwe):
-                cwe_type = future_to_cwe[future]
-                try:
-                    results = future.result()
-                    if results:
-                        all_results.extend(results)
-                        print(f"    [{cwe_type}] 发现 {len(results)} 个漏洞")
-                except Exception as e:
-                    print(f"    [{cwe_type}] 分析失败: {e}")
-        
-        return all_results
-
-    
-    def analyze(self, code_file, code_content, file_info):
-        """执行完整的多Agent协同分析 - 优化版"""
-        
-        # 生成缓存键 - 基于文件路径和文件修改时间，而不是代码内容
-        # 因为代码内容可能被修改（如添加行号），但文件路径不变
-        file_mtime = os.path.getmtime(code_file) if os.path.exists(code_file) else 0
-        cache_key = f"{code_file}_{file_mtime}"
-        
-        # 检查缓存（如果启用缓存）
-        if self.use_cache:
-            with self._analysis_cache_lock:
-                if cache_key in self.analysis_cache:
-                    print(f"\n使用缓存结果: {file_info.get('file_name')}")
-                    return self.analysis_cache[cache_key]
-        
-        print(f"\n开始分析: {file_info.get('file_name')}")
-
-        # 1. 静态分析Agent
-        static_result = self.static_agent.process(code_file)
-
-        # 1.1 提取静态规则证据（后续用于证据评分加权）
-        static_rule_cwes = set()
+    def _validate_vulnerability_entry(self, entry: Dict[str, Any]):
         try:
-            from joern_utils_final_solution import FinalJoernHandler
-            dot_file = static_result.get("dot_file", "")
-            if dot_file:
-                handler = FinalJoernHandler()
-                jf = handler.extract_data_flow_with_context(dot_file)
-                for v in jf.get("vulnerabilities", []) or []:
-                    vtype = (v.get("type", "") or "").strip()
-                    if vtype == "DANGEROUS_FUNCTION":
-                        func_name = (v.get("function", "") or "").lower()
-                        # 缓冲区/拷贝相关（CWE-119/120 在评估中主要以 119 归类）
-                        if any(x in func_name for x in ["strcpy", "strcat", "sprintf", "gets", "memcpy", "memmove", "ib_copy_from_udata"]):
-                            static_rule_cwes.add("CWE-119")
-                        # 格式化字符串
-                        elif any(x in func_name for x in ["printf", "fprintf", "snprintf", "syslog", "dev_dbg", "dev_info", "pr_info", "pr_err"]):
-                            static_rule_cwes.add("CWE-134")
-                        # 命令执行
-                        elif any(x in func_name for x in ["system", "exec", "popen"]):
-                            static_rule_cwes.add("CWE-78")
-                        # 路径遍历/文件访问
-                        elif "fopen" in func_name:
-                            static_rule_cwes.add("CWE-22")
-                    elif vtype == "DANGEROUS_DATA_FLOW":
-                        src = (v.get("source", "") or "").lower()
-                        tgt = (v.get("target", "") or "").lower()
-                        joined = src + " " + tgt
-                        if any(x in joined for x in ["strcpy", "strcat", "sprintf", "gets", "memcpy", "memmove", "ib_copy_from_udata"]):
-                            static_rule_cwes.add("CWE-119")
-                        elif "%" in joined or any(x in joined for x in ["printf", "fprintf", "snprintf"]):
-                            static_rule_cwes.add("CWE-134")
+            confidence = int(float(entry.get("confidence", 0) or 0))
+            evidence_score = int(float(entry.get("evidence_score", 0) or 0))
         except Exception:
-            # 规则证据失败不应中断主流程
-            static_rule_cwes = set()
-        
-        # 2. 切片构造Agent
-        slice_result = self.slice_agent.process(code_content, static_result)
-        
-        # precision优先：没有可疑切片时直接返回空报告，避免误报扩散
-        if slice_result["suspicious_count"] == 0:
-            result = {
-                "static": static_result,
-                "slice": slice_result,
-                "llm": [],
-                "validation": [],
-                "report": self.report_agent._empty_report(file_info, static_result),
-            }
-            if self.use_cache:
-                with self._analysis_cache_lock:
-                    self.analysis_cache[cache_key] = result
-            return result
+            return False, {}, ["vulnerability entry: confidence/evidence_score must be number"]
 
-        # 2.1 证据评分：从二值门控升级为分值决策
-        candidate_cwes = set(slice_result.get("slices_by_cwe", {}).keys()) | static_rule_cwes
-        evidence_scores = {}
-        for cwe in candidate_cwes:
-            score_item = self.evidence_scorer.score(cwe, static_result, slice_result, code_content)
-            if cwe in static_rule_cwes:
-                score_item["score"] = min(100, score_item.get("score", 0) + 15)
-                score_item["reasons"].append("static_rule_hit")
-            evidence_scores[cwe] = score_item
+        cwe = str(entry.get("cwe", "") or "").strip()
+        location = str(entry.get("location", "") or "").strip()
+        if not cwe or not location:
+            return False, {}, ["vulnerability entry: cwe/location required"]
 
-        # 按证据评分筛选进入LLM的CWE
-        llm_input_slices = {}
-        for cwe, c_slice in slice_result.get("slices_by_cwe", {}).items():
-            s = evidence_scores.get(cwe, {"score": 0})
-            if self.evidence_scorer.should_enter_llm(s):
-                llm_input_slices[cwe] = c_slice
+        severity = str(entry.get("severity", "medium") or "medium").lower()
+        if severity not in {"critical", "high", "medium", "low"}:
+            severity = "medium"
 
-        if not llm_input_slices:
-            result = {
-                "static": static_result,
-                "slice": slice_result,
-                "llm": [],
-                "validation": [],
-                "report": self.report_agent._empty_report(file_info, static_result)
-            }
-            if self.use_cache:
-                with self._analysis_cache_lock:
-                    self.analysis_cache[cache_key] = result
-            return result
+        normalized = dict(entry)
+        normalized["confidence"] = max(0, min(100, confidence))
+        normalized["evidence_score"] = max(0, min(100, evidence_score))
+        normalized["severity"] = severity
+        return True, normalized, []
 
-        # 3. 使用专门化LLM Agent进行推理
-        llm_results = self._process_with_specialized_agents(
-            llm_input_slices,
-            full_code_context=code_content[:500],
-            static_result=static_result,
-            slice_result=slice_result,
-        )
+    def _validate_report_schema(self, report: Dict[str, Any]):
+        warnings = []
+        if not isinstance(report, dict):
+            return False, {}, ["report schema: report must be object"]
 
-        # 3.1 证据评分过滤：低分结果直接淘汰
-        # 对语义类CWE使用更低的分数门槛
-        _SEMANTIC_CWES = {
-            "CWE-200", "CWE-209", "CWE-264", "CWE-399", "CWE-835",
-            "CWE-20", "CWE-189", "CWE-125", "CWE-459", "CWE-400",
-        }
-        filtered_llm = []
-        for r in llm_results:
-            cwe = r.get("cwe", "")
-            s = evidence_scores.get(cwe, {"score": 0, "evidence_chain": {}})
-            # 第二轮：允许"弱路径+强锚点"通过，避免召回过低
-            weak_path_plus_anchor = (
-                cwe in {"CWE-119", "CWE-120", "CWE-121", "CWE-122", "CWE-126"}
-                and s.get("score", 0) >= 24
-                and ("flow_hits=" in " ".join(s.get("reasons", [])) or "suspicious_lines=" in " ".join(s.get("reasons", [])))
-            )
-            # 语义类CWE：降低证据分门槛（从30降至15），避免召回过低
-            semantic_pass = cwe in _SEMANTIC_CWES and s.get("score", 0) >= 15
-            if s.get("score", 0) >= 30 or weak_path_plus_anchor or semantic_pass:
-                r["_evidence_score"] = s.get("score", 0)
-                r["_evidence_chain"] = s.get("evidence_chain", {})
-                r["_evidence_reasons"] = s.get("reasons", [])
-                filtered_llm.append(r)
-        llm_results = filtered_llm
+        required_keys = [
+            "file",
+            "project",
+            "scan_time",
+            "total_vulnerabilities",
+            "vulnerabilities_by_cwe",
+            "severity_summary",
+            "vulnerabilities",
+            "static_analysis_summary",
+        ]
+        for key in required_keys:
+            if key not in report:
+                warnings.append(f"report schema: missing key={key}")
 
-        # 如果没有发现漏洞，返回空报告
-        if not llm_results:
-            result = {
-                "static": static_result,
-                "slice": slice_result,
-                "llm": [],
-                "validation": [],
-                "report": self.report_agent._empty_report(file_info, static_result)
-            }
-            if self.use_cache:
-                with self._analysis_cache_lock:
-                    self.analysis_cache[cache_key] = result
-            return result
-        
-        # 4. 假设验证Agent
-        validated_results = self.validator_agent.process(
-            llm_results, code_content, slice_result
-        )
-        
-        # 5. 报告生成Agent
-        report = self.report_agent.process(validated_results, file_info, static_result)
-        
-        result = {
-            "static": static_result,
-            "slice": slice_result,
-            "llm": llm_results,
-            "validation": validated_results,
-            "report": report
-        }
-        
-        # 保存到缓存（如果启用缓存）
-        if self.use_cache:
-            with self._analysis_cache_lock:
-                self.analysis_cache[cache_key] = result
-        
-        return result
+        if not isinstance(report.get("vulnerabilities", []), list):
+            warnings.append("report schema: vulnerabilities must be list")
+            report["vulnerabilities"] = []
+        if not isinstance(report.get("vulnerabilities_by_cwe", {}), dict):
+            warnings.append("report schema: vulnerabilities_by_cwe must be object")
+            report["vulnerabilities_by_cwe"] = {}
+        if not isinstance(report.get("severity_summary", {}), dict):
+            warnings.append("report schema: severity_summary must be object")
+            report["severity_summary"] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        if not isinstance(report.get("static_analysis_summary", {}), dict):
+            warnings.append("report schema: static_analysis_summary must be object")
+            report["static_analysis_summary"] = {"slices_count": 0, "data_flows_count": 0, "functions_count": 0}
 
-    
-    def clear_cache(self):
-        """清理所有缓存"""
-        with self._analysis_cache_lock:
-            self.analysis_cache.clear()
-        self.static_agent.cache.clear()
-        # 清理所有专门化Agent的缓存
-        for agent in self.specialized_agents.values():
-            if hasattr(agent.llm, 'cache'):
-                agent.llm.cache.clear()
-        self.validator_agent.validation_cache.clear()
-        print("所有缓存已清理")
-    
-    def get_cache_stats(self):
-        """获取缓存统计"""
-        # 收集所有专门化Agent的缓存统计
-        llm_stats = {}
-        total_cache_hits = 0
-        total_cache_misses = 0
-        total_api_calls = 0
-        
-        for cwe, agent in self.specialized_agents.items():
-            if hasattr(agent.llm, 'get_cache_stats'):
-                stats = agent.llm.get_cache_stats()
-                total_cache_hits += stats.get('cache_hits', 0)
-                total_cache_misses += stats.get('cache_misses', 0)
-                total_api_calls += stats.get('api_calls', 0)
-                llm_stats[cwe] = stats
-        
-        return {
-            "analysis_cache_size": len(self.analysis_cache),
-            "llm_cache_stats": {
-                "total_cache_hits": total_cache_hits,
-                "total_cache_misses": total_cache_misses,
-                "total_api_calls": total_api_calls,
-                "cache_hit_rate": (total_cache_hits / max(1, total_cache_hits + total_cache_misses)) * 100,
-                "by_cwe": llm_stats
-            },
-            "static_cache_size": len(self.static_agent.cache),
-            "validation_cache_size": len(self.validator_agent.validation_cache)
-        }
-
-
-# 兼容 vulnscan、evaluation_module 等仍从 agent 导入 MetaAgent 的调用方
-MetaAgent = SpecializedMetaAgent
+        return True, report, warnings

@@ -16,28 +16,22 @@ pip install -r requirements.txt
 `requirements.txt` 覆盖：
 - `requests`：LLM API 调用
 - `pandas`：HuggingFace 数据集处理/统计
-- `datasets`：HuggingFace 数据集加载（仅在使用 `primevul/secvul/java_hf` 时需要）
+- `datasets`：HuggingFace 数据集加载（仅在使用 `primevul/secvul` 时需要）
 
 ---
 
-## 2) Joern（必需，用于 C/Java 静态分析）
+## 2) Joern（必需，用于 C/C++ 静态分析）
 
 ### 2.1 必需文件
 在 `config.py` 中配置以下路径（Windows 常见为 `*.bat`）：
 - `JOERN_PATH`：joern-cli 解压目录
 - `JOERN_PARSE / JOERN_EXPORT / JOERN_BAT`
-- `JAVASRC2CPG_BAT`：Java 前端（通常在 `frontends/javasrc2cpg/bin/`）
-
-可选（推荐）：
-- `JOERN_PATH_V2`：新版 joern-cli（用于 Java workspace 解析更稳）
-- `JAVASRC2CPG_BAT_V2`
 
 ### 2.2 快速自检
 确保下列文件存在：
 - `JOERN_PARSE(.bat)`
 - `JOERN_EXPORT(.bat)`
 - `joern(.bat)`
-- `javasrc2cpg(.bat)`（Java 扫描需要）
 
 ---
 
@@ -64,12 +58,12 @@ $env:LLM_API_KEY="你的密钥"
 
 ## 4) HuggingFace 数据集（可选）
 
-当使用 `primevul / secvul / java_hf` 数据源时，需要：
+当使用 `primevul / secvul` 数据源时，需要：
 - `datasets`（Python 包）
 - 可访问 HuggingFace Hub（或镜像）
 
 镜像配置：
-- 代码里 `config.apply_hf_mirror(...)` 会在加载数据集前设置 `HF_ENDPOINT` 等变量
+- 数据集加载已强制走 `HF_MIRROR_ENDPOINT`（默认 `https://hf-mirror.com`），并在加载前设置 `HF_ENDPOINT` 等变量
 - UI 数据集扫描中可勾选 “Use HF mirror”
 
 ---
