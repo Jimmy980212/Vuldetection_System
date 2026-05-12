@@ -1,0 +1,43 @@
+cd d:\zhuomian\vulnshield-c-cli
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+$env:LLM_PROVIDER="deepseek"
+$env:LLM_API_KEY="your_api_key"
+$env:LLM_API_BASE="https://api.deepseek.com/v1"
+$env:LLM_MODEL="deepseek-chat"
+
+============================================================
+1) 普通模式（单文件）
+============================================================
+
+python main.py --mode detect --source local --file dataset/sparse_big_less100.c --parallel 2
+
+============================================================
+2) 文件夹模式（目录批量）
+============================================================
+
+python main.py --mode detect --source local --dir dataset --max-samples 12 --parallel 2
+
+============================================================
+3) vulnscan 模式（工程级扫描）
+============================================================
+
+# C 工程
+python main.py --mode scan --lang c --root dataset/multi_c_project --parallel 2
+
+# C 工程 + 共享 workspace CPG
+python main.py --mode scan --lang c --root dataset/multi_c_project --parallel 2 --c-workspace-cpg
+
+============================================================
+4) 数据集加载模式（在线数据集）
+============================================================
+
+# PrimeVul
+python main.py --mode detect --source primevul --samples 10 --vuln-ratio 0.5 --split test --parallel 4 --seed 42
+
+# SecVulEval
+python main.py --mode detect --source secvul --samples 10 --vuln-ratio 0.5 --split train --parallel 4 --seed 42
+
+============================================================

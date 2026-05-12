@@ -1,0 +1,35 @@
+# Environment secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-linux/
+venv/
+
+# Claude Code
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Project output
+temp/
+output/
+result/
+test-results/
+frontend/output/
+frontend/result/
+
+# Dataset cache
+dataset/cache/

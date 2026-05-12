@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VulSage 智擎 · 多Agent漏洞检测系统</title>
+    <link rel="preconnect" href="https://unpkg.com" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="#" data-page="overview" aria-label="VulSage 首页">
+          <span class="brand-mark"><i data-lucide="shield-check"></i></span>
+          <span>
+            <strong>VulSage 智擎</strong>
+            <small>多Agent漏洞检测系统</small>
+          </span>
+        </a>
+
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item is-active" data-page="overview"><i data-lucide="gauge"></i><span>概览仪表盘</span></button>
+          <button class="nav-item" data-page="projects"><i data-lucide="folder-kanban"></i><span>项目管理</span></button>
+          <button class="nav-item" data-page="analysis"><i data-lucide="file-code-2"></i><span>代码分析</span></button>
+          <button class="nav-item" data-page="tasks"><i data-lucide="clipboard-list"></i><span>检测任务</span></button>
+          <button class="nav-item" data-page="results"><i data-lucide="shield-alert"></i><span>漏洞结果</span></button>
+          <button class="nav-item" data-page="agents"><i data-lucide="workflow"></i><span>Agent监控</span></button>
+          <button class="nav-item" data-page="settings"><i data-lucide="settings"></i><span>系统配置</span></button>
+          <button class="nav-item" data-page="reports"><i data-lucide="file-chart-column"></i><span>报告管理</span></button>
+          <button class="nav-item" data-page="docs"><i data-lucide="circle-help"></i><span>帮助文档</span></button>
+        </nav>
+
+        <section class="system-card" aria-label="系统状态">
+          <div class="mini-title">
+            <span>系统状态</span>
+            <em><span class="dot ok"></span>运行中</em>
+          </div>
+          <div class="meter-row">
+            <span>CPU使用率</span><b>32%</b>
+            <div class="meter"><span style="width:32%"></span></div>
+          </div>
+          <div class="meter-row">
+            <span>内存使用率</span><b>61%</b>
+            <div class="meter green"><span style="width:61%"></span></div>
+          </div>
+          <div class="meter-row">
+            <span>硬盘使用率</span><b>44%</b>
+            <div class="meter green"><span style="width:44%"></span></div>
+          </div>
+          <div class="meter-row">
+            <span>LLM Token剩余额度</span><b>2.38M / 5.00M</b>
+            <div class="meter"><span style="width:48%"></span></div>
+          </div>
+        </section>
+        <div class="version">VulSage v1.0.0</div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div class="project-switch">
+            <span>当前项目：</span>
+            <strong>Linux Kernel 6.6.0</strong>
+            <i data-lucide="chevron-down"></i>
+          </div>
+          <button class="primary-action" data-action="new-scan"><i data-lucide="plus"></i><span>新建检测</span></button>
+          <button class="icon-btn" aria-label="通知"><i data-lucide="bell"></i></button>
+          <button class="icon-btn" aria-label="设置"><i data-lucide="settings"></i></button>
+          <button class="user-menu" aria-label="用户菜单">
+            <span class="avatar">A</span>
+            <span>admin</span>
+            <i data-lucide="chevron-down"></i>
+          </button>
+        </header>
+
+        <main id="app" class="content" tabindex="-1"></main>
+      </section>
+    </div>
+
+    <div class="drawer-backdrop" data-close-drawer></div>
+    <aside class="scan-drawer" aria-label="新建检测任务" aria-hidden="true">
+      <div class="drawer-head">
+        <div>
+          <span class="eyebrow">New Detection</span>
+          <h2>新建检测任务</h2>
+        </div>
+        <button class="icon-btn" data-close-drawer aria-label="关闭"><i data-lucide="x"></i></button>
+      </div>
+      <div class="form-grid">
+        <div class="field field-vertical">
+          <label>检测项目</label>
+          <select>
+            <option>Linux Kernel 6.6.0</option>
+            <option>FFmpeg 6.1</option>
+            <option>QEMU 8.2.0</option>
+          </select>
+        </div>
+        <div class="field field-vertical">
+          <label>扫描范围</label>
+          <input value="drivers/, net/, fs/" />
+        </div>
+        <div class="field field-vertical">
+          <label>检测策略</label>
+          <select>
+            <option>多Agent深度检测</option>
+            <option>快速静态检测</option>
+            <option>LLM辅助验证</option>
+          </select>
+        </div>
+        <div class="field field-vertical">
+          <label>风险等级</label>
+          <select>
+            <option>高危优先</option>
+            <option>全部等级</option>
+            <option>仅确认漏洞</option>
+          </select>
+        </div>
+        <div class="drawer-agents">
+          <span class="badge info">预处理</span>
+          <span class="badge info">切片</span>
+          <span class="badge info">建模</span>
+          <span class="badge mid">LLM推理</span>
+          <span class="badge ok">验证</span>
+          <span class="badge info">报告</span>
+        </div>
+        <button class="primary-action drawer-submit"><i data-lucide="play"></i>开始检测</button>
+      </div>
+    </aside>
+
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script src="./app.js" defer></script>
+  </body>
+</html>
